@@ -2,36 +2,36 @@ services:
   ros2:
     build:
       context: .
-      dockerfile: Dockerfile
-    image: isaacsim-store-shelf:humble
-    pull_policy: never
-    working_dir: /workspace
-    command: >-
-      bash -lc "source /opt/ros/humble/setup.bash &&
-      colcon build --symlink-install &&
-      source install/setup.bash &&
-      ros2 run store_shelf_controller controller"
+      dockerfile: Dockerfile.ros2
+    image: isaacsim-store-shelf:ros2
+    network_mode: host
+    ipc: host
     environment:
-      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
-      - ROS_LOCALHOST_ONLY=${ROS_LOCALHOST_ONLY:-1}
+      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
+      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+      ROS_LOCALHOST_ONLY: ${ROS_LOCALHOST_ONLY:-0}
+    working_dir: /workspace
     stdin_open: true
     tty: true
     volumes:
       - ./:/workspace
 
   isaacsim:
-    image: nvcr.io/nvidia/isaac-sim:5.1.0
-    entrypoint:
-      - /bin/bash
-      - -lc
-      - 'case "$$ISAACSIM_MODE" in headless) ./runheadless.sh -v ;; headed) ./runapp.sh --/rtx/verifyDriverVersion/enabled=false ;; *) echo "Unsupported ISAACSIM_MODE=$$ISAACSIM_MODE. Use headed or headless." >&2; exit 1 ;; esac'
-    working_dir: /isaac-sim
+    build:
+      context: .
+      dockerfile: Dockerfile.isaacsim
+    image: isaacsim-store-shelf:isaacsim
     network_mode: host
+    ipc: host
     gpus: all
     environment:
       ACCEPT_EULA: "Y"
+      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
       PRIVACY_CONSENT: "Y"
-      ISAACSIM_MODE: ${ISAACSIM_MODE:-headed}
+      ISAACSIM_ROOT: /isaac-sim
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
+      ROS_LOCALHOST_ONLY: ${ROS_LOCALHOST_ONLY:-0}
       NVIDIA_DRIVER_CAPABILITIES: all
       NVIDIA_VISIBLE_DEVICES: all
       __NV_PRIME_RENDER_OFFLOAD: "1"
@@ -39,10 +39,26 @@ services:
       __GLX_VENDOR_LIBRARY_NAME: nvidia
       DISPLAY: ${DISPLAY:-:0}
       XAUTHORITY: /isaac-sim/.Xauthority
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONPYCACHEPREFIX: /tmp/isaacsim_pycache
+      PYTHONUNBUFFERED: "1"
     stdin_open: true
     tty: true
     user: "1234:1234"
+    entrypoint:
+      - /bin/bash
+      - -lc
+    command:
+      - |
+        export ROS_DISTRO=jazzy
+        export RMW_IMPLEMENTATION="$${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
+        export COLCON_PYTHON_EXECUTABLE=/isaac-sim/kit/python/bin/python3
+        export PYTHONPATH="/workspace/src/isaacsim_manager:/isaac-sim/exts/isaacsim.ros2.bridge/jazzy/rclpy:$${PYTHONPATH:-}"
+        export LD_LIBRARY_PATH="/isaac-sim/exts/isaacsim.ros2.bridge/jazzy/lib:$${LD_LIBRARY_PATH:-}"
+        echo "Starting Isaac Sim manager from /workspace/src/isaacsim_manager"
+        exec /isaac-sim/python.sh -m isaacsim_manager.manager
     volumes:
+      - ./src:/workspace/src:ro
       - ${HOME}/.Xauthority:/isaac-sim/.Xauthority:ro
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ./.docker/isaacsim/cache/main:/isaac-sim/.cache

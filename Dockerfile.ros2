@@ -1,0 +1,27 @@
+FROM ros:jazzy-ros-base
+
+SHELL ["/bin/bash", "-lc"]
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3-colcon-common-extensions \
+    ros-jazzy-launch \
+    ros-jazzy-launch-ros \
+    ros-jazzy-rclpy \
+    ros-jazzy-ros2launch \
+    ros-jazzy-std-msgs \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /workspace
+
+RUN printf '%s\n' \
+    'source /opt/ros/jazzy/setup.bash' \
+    'if [ -d /workspace/src ] && { [ ! -f /workspace/install/setup.bash ] || [ ! -d /workspace/install/controller ]; }; then' \
+    '  echo "Building ROS workspace with colcon build --symlink-install..."' \
+    '  (cd /workspace && colcon build --symlink-install)' \
+    'fi' \
+    'if [ -f /workspace/install/setup.bash ]; then' \
+    '  source /workspace/install/setup.bash' \
+    'fi' \
+    >> /etc/bash.bashrc
+
+CMD ["bash", "-lc", "source /opt/ros/jazzy/setup.bash && colcon build --symlink-install && source install/setup.bash && ros2 launch controller sim.launch.py"]

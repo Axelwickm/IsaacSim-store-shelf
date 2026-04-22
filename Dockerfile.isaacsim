@@ -1,0 +1,7 @@
+FROM nvcr.io/nvidia/isaac-sim:5.1.0
+
+SHELL ["/bin/bash", "-lc"]
+
+WORKDIR /workspace
+
+ENV ISAACSIM_ROOT=/isaac-sim

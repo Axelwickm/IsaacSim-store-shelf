@@ -1,7 +1,7 @@
 from setuptools import find_packages, setup
 
 
-package_name = "store_shelf_controller"
+package_name = "isaacsim_manager"
 
 
 setup(
@@ -16,11 +16,11 @@ setup(
     zip_safe=True,
     maintainer="axel",
     maintainer_email="axel@example.com",
-    description="Minimal Python ROS 2 controller scaffold for Isaac Sim store shelf.",
+    description="ROS 2 manager node for coordinating a running Isaac Sim process.",
     license="Apache-2.0",
     entry_points={
         "console_scripts": [
-            "controller = store_shelf_controller.controller:main",
+            "manager = isaacsim_manager.manager:main",
         ],
     },
 )

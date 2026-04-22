@@ -1,13 +1,13 @@
 # IsaacSim Store Shelf
 
-Minimal ROS 2 Humble Python workspace scaffold for the proper Isaac Sim + ROS 2 version of this project.
+Minimal ROS 2 Jazzy Python workspace scaffold for the proper Isaac Sim + ROS 2 version of this project.
 
 
 ## What This Starts With
 
-- A single Python ROS 2 package: `store_shelf_controller`
+- A single Python ROS 2 package: `controller`
 - One executable script: `controller.py`
-- Docker Compose wired to a `ros:humble-ros-base`-derived image
+- Docker Compose wired to a `ros:jazzy-ros-base`-derived image
 
 ## Run
 
@@ -17,20 +17,23 @@ docker compose up --build
 
 The container will:
 
-1. Source ROS 2 Humble
+1. Source ROS 2 Jazzy
 2. Build the workspace with `colcon`
-3. Run `ros2 run store_shelf_controller controller`
+3. Run `ros2 launch controller sim.launch.py`
 
-Right now the controller only proves the ROS environment is there by importing and initializing `rclpy`, then printing/logging a hello-world message.
+Right now the controller proves the ROS environment is there by importing and initializing `rclpy`, then logging the selected launch parameters.
+
+Pass simulation launch options as ROS launch arguments:
+
+```bash
+docker compose run --rm ros2 bash -lc "source /opt/ros/jazzy/setup.bash && colcon build --symlink-install && source install/setup.bash && ros2 launch controller sim.launch.py headless:=true scene:=store_shelf.usd"
+```
 
 ## Isaac Sim GUI
 
 The compose file also includes an `isaacsim` service using the latest stable NVIDIA Isaac Sim container image: `nvcr.io/nvidia/isaac-sim:5.1.0`.
 
-Use `ISAACSIM_MODE` to choose how Isaac Sim starts:
-
-- `headed`: launches the windowed app with `./runapp.sh`
-- `headless`: launches the streaming build with `./runheadless.sh -v`
+The Isaac Sim service starts only the manager. Publish a command to `isaacsim_manager/control` to start, stop, or restart Isaac Sim.
 
 Headed mode needs local X11 access on Linux:
 
@@ -49,12 +52,14 @@ Start headed:
 
 ```bash
 docker compose up isaacsim
+docker compose run --rm ros2 bash -lc "source /opt/ros/jazzy/setup.bash && ros2 topic pub --once /isaacsim_manager/control std_msgs/msg/String '{data: start}'"
 ```
 
 Start headless:
 
 ```bash
-ISAACSIM_MODE=headless docker compose up isaacsim
+docker compose up isaacsim
+docker compose run --rm ros2 bash -lc "source /opt/ros/jazzy/setup.bash && ros2 topic pub --once /isaacsim_manager/control std_msgs/msg/String '{data: start_headless}'"
 ```
 
 This service keeps its cache, config, logs, and app data in repo-local bind mounts under `.docker/isaacsim/`.
