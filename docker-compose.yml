@@ -1,0 +1,19 @@
+services:
+  ros2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: isaacsim-store-shelf:humble
+    working_dir: /workspace
+    command: >-
+      bash -lc "source /opt/ros/humble/setup.bash &&
+      colcon build --symlink-install &&
+      source install/setup.bash &&
+      ros2 run store_shelf_controller controller"
+    environment:
+      - ROS_DOMAIN_ID=${ROS_DOMAIN_ID:-0}
+      - ROS_LOCALHOST_ONLY=${ROS_LOCALHOST_ONLY:-1}
+    stdin_open: true
+    tty: true
+    volumes:
+      - ./:/workspace
