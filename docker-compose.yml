@@ -4,6 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     image: isaacsim-store-shelf:humble
+    pull_policy: never
     working_dir: /workspace
     command: >-
       bash -lc "source /opt/ros/humble/setup.bash &&
@@ -17,3 +18,36 @@ services:
     tty: true
     volumes:
       - ./:/workspace
+
+  isaacsim:
+    image: nvcr.io/nvidia/isaac-sim:5.1.0
+    entrypoint:
+      - /bin/bash
+      - -lc
+      - 'case "$$ISAACSIM_MODE" in headless) ./runheadless.sh -v ;; headed) ./runapp.sh --/rtx/verifyDriverVersion/enabled=false ;; *) echo "Unsupported ISAACSIM_MODE=$$ISAACSIM_MODE. Use headed or headless." >&2; exit 1 ;; esac'
+    working_dir: /isaac-sim
+    network_mode: host
+    gpus: all
+    environment:
+      ACCEPT_EULA: "Y"
+      PRIVACY_CONSENT: "Y"
+      ISAACSIM_MODE: ${ISAACSIM_MODE:-headed}
+      NVIDIA_DRIVER_CAPABILITIES: all
+      NVIDIA_VISIBLE_DEVICES: all
+      __NV_PRIME_RENDER_OFFLOAD: "1"
+      __VK_LAYER_NV_optimus: NVIDIA_only
+      __GLX_VENDOR_LIBRARY_NAME: nvidia
+      DISPLAY: ${DISPLAY:-:0}
+      XAUTHORITY: /isaac-sim/.Xauthority
+    stdin_open: true
+    tty: true
+    user: "1234:1234"
+    volumes:
+      - ${HOME}/.Xauthority:/isaac-sim/.Xauthority:ro
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+      - ./.docker/isaacsim/cache/main:/isaac-sim/.cache
+      - ./.docker/isaacsim/cache/computecache:/isaac-sim/.nv/ComputeCache
+      - ./.docker/isaacsim/logs:/isaac-sim/.nvidia-omniverse/logs
+      - ./.docker/isaacsim/config:/isaac-sim/.nvidia-omniverse/config
+      - ./.docker/isaacsim/data:/isaac-sim/.local/share/ov/data
+      - ./.docker/isaacsim/pkg:/isaac-sim/.local/share/ov/pkg
