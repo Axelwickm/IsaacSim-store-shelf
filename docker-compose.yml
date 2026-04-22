@@ -58,7 +58,7 @@ services:
         echo "Starting Isaac Sim manager from /workspace/src/isaacsim_manager"
         exec /isaac-sim/python.sh -m isaacsim_manager.manager
     volumes:
-      - ./src:/workspace/src:ro
+      - ./:/workspace:ro
       - ${HOME}/.Xauthority:/isaac-sim/.Xauthority:ro
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ./.docker/isaacsim/cache/main:/isaac-sim/.cache

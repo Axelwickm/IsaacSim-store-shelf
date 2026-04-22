@@ -6,7 +6,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description() -> LaunchDescription:
     headless = LaunchConfiguration("headless")
-    scene = LaunchConfiguration("scene")
+    configuration = LaunchConfiguration("configuration")
 
     return LaunchDescription(
         [
@@ -16,9 +16,9 @@ def generate_launch_description() -> LaunchDescription:
                 description="Whether Isaac Sim should launch in headless mode.",
             ),
             DeclareLaunchArgument(
-                "scene",
+                "configuration",
                 default_value="",
-                description="Scene or USD file to load when Isaac Sim starts.",
+                description="Named simulation configuration to load.",
             ),
             Node(
                 package="controller",
@@ -28,7 +28,7 @@ def generate_launch_description() -> LaunchDescription:
                 parameters=[
                     {
                         "headless": headless,
-                        "scene": scene,
+                        "configuration": configuration,
                     }
                 ],
             ),

@@ -15,7 +15,7 @@ MANAGER_CONTROL_TOPIC = "/isaacsim_manager/control"
 MANAGER_ACK_TOPIC = "/isaacsim_manager/ack"
 MANAGER_WAIT_TIMEOUT_SECONDS = 10.0
 PUBLISHER_MATCH_TIMEOUT_SECONDS = 5.0
-ACK_TIMEOUT_SECONDS = 10.0
+ACK_TIMEOUT_SECONDS = 180.0
 
 
 def _topic_exists(node: Node, topic_name: str) -> bool:
@@ -40,17 +40,17 @@ def main() -> None:
             manager_ack = payload
 
     node.declare_parameter("headless", False)
-    node.declare_parameter("scene", "")
+    node.declare_parameter("configuration", "")
     node.declare_parameter("command", "")
     headless = node.get_parameter("headless").value
-    scene = node.get_parameter("scene").value
+    configuration = str(node.get_parameter("configuration").value).strip()
     command_param = str(node.get_parameter("command").value).strip()
     node.get_logger().info("rclpy is available")
     node.get_logger().info(
         f"RMW_IMPLEMENTATION={os.environ.get('RMW_IMPLEMENTATION', 'unset')}"
     )
     node.get_logger().info(f"headless={headless}")
-    node.get_logger().info(f"scene={scene}")
+    node.get_logger().info(f"configuration={configuration}")
     node.get_logger().info(f"command={command_param}")
 
     request_id = uuid.uuid4().hex
@@ -60,7 +60,7 @@ def main() -> None:
         {
             "id": request_id,
             "command": command_name,
-            "scene": scene,
+            "configuration": configuration,
         },
         separators=(",", ":"),
     )
