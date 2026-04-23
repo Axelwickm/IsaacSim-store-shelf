@@ -2,6 +2,7 @@
 
 import os
 import json
+import traceback
 import uuid
 from pathlib import Path
 
@@ -9,9 +10,11 @@ import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
 
-from isaacsim_manager.simulation_app import (
+from isaacsim_manager.image_collection import (
     DEFAULT_COLLECT_VISION_SCENE,
     collect_vision_data,
+    static,
+    update_simulation_app,
 )
 
 START_HEADED = "headed"
@@ -20,6 +23,7 @@ CONTROL_TOPIC = "isaacsim_manager/control"
 ACK_TOPIC = "isaacsim_manager/ack"
 CONFIGURATION_FUNCTIONS = {
     "collect_vision_data": collect_vision_data,
+    "static": static,
 }
 
 
@@ -51,7 +55,7 @@ class IsaacSimManagerNode(Node):
     def _update_simulation_app(self) -> None:
         if self._simulation_app is None:
             return
-        self._simulation_app.update()
+        update_simulation_app(self._simulation_app)
 
     def _is_running(self) -> bool:
         return self._simulation_app is not None
@@ -77,6 +81,10 @@ class IsaacSimManagerNode(Node):
             self._simulation_app = self._create_simulation_app(mode)
             result = CONFIGURATION_FUNCTIONS[configuration](self._simulation_app)
         except Exception as exc:
+            self.get_logger().error(
+                "Failed while starting simulation configuration:\n"
+                + traceback.format_exc()
+            )
             self._close_simulation_app()
             return False, f"Failed to start Isaac Sim: {exc}"
 
