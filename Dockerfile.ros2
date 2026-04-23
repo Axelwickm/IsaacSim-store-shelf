@@ -3,19 +3,28 @@ FROM ros:jazzy-ros-base
 SHELL ["/bin/bash", "-lc"]
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libglib2.0-0 \
+    python3-opencv \
+    python3-pip \
     python3-colcon-common-extensions \
     ros-jazzy-launch \
     ros-jazzy-launch-ros \
     ros-jazzy-rclpy \
     ros-jazzy-ros2launch \
     ros-jazzy-std-msgs \
+    x11-apps \
  && rm -rf /var/lib/apt/lists/*
+
+RUN python3 -m pip install --no-cache-dir --break-system-packages \
+    torch \
+    torchvision
 
 WORKDIR /workspace
 
 RUN printf '%s\n' \
     'source /opt/ros/jazzy/setup.bash' \
-    'if [ -d /workspace/src ] && { [ ! -f /workspace/install/setup.bash ] || [ ! -d /workspace/install/controller ]; }; then' \
+    'if [ -d /workspace/src ] && [ ! -f /workspace/install/setup.bash ]; then' \
     '  echo "Building ROS workspace with colcon build --symlink-install..."' \
     '  (cd /workspace && colcon build --symlink-install)' \
     'fi' \

@@ -1,26 +1,10 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
-from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch_ros.substitutions import FindPackageShare
+from launch.actions import DeclareLaunchArgument
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 
 
 def generate_launch_description() -> LaunchDescription:
-    batch_size = LaunchConfiguration("batch_size")
-    checkpoint_dir = LaunchConfiguration("checkpoint_dir")
-    checkpoint_path = LaunchConfiguration("checkpoint_path")
-    dataset_dir = LaunchConfiguration("dataset_dir")
-    mode = LaunchConfiguration("mode")
-    split = LaunchConfiguration("split")
-    learning_rate = LaunchConfiguration("learning_rate")
-    resume = LaunchConfiguration("resume")
-    save_every_epochs = LaunchConfiguration("save_every_epochs")
-    image_size = LaunchConfiguration("image_size")
-    use_mixed_precision = LaunchConfiguration("use_mixed_precision")
-    vision_launch = PathJoinSubstitution(
-        [FindPackageShare("vision"), "launch", "train_vision.launch.py"]
-    )
-
     return LaunchDescription(
         [
             DeclareLaunchArgument(
@@ -78,21 +62,26 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="true",
                 description="Whether to enable CUDA mixed precision.",
             ),
-            IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(vision_launch),
-                launch_arguments={
-                    "dataset_dir": dataset_dir,
-                    "checkpoint_dir": checkpoint_dir,
-                    "checkpoint_path": checkpoint_path,
-                    "batch_size": batch_size,
-                    "split": split,
-                    "mode": mode,
-                    "learning_rate": learning_rate,
-                    "resume": resume,
-                    "save_every_epochs": save_every_epochs,
-                    "image_size": image_size,
-                    "use_mixed_precision": use_mixed_precision,
-                }.items(),
+            Node(
+                package="vision",
+                executable="train_vision",
+                name="vision_trainer",
+                output="screen",
+                parameters=[
+                    {
+                        "dataset_dir": LaunchConfiguration("dataset_dir"),
+                        "checkpoint_dir": LaunchConfiguration("checkpoint_dir"),
+                        "checkpoint_path": LaunchConfiguration("checkpoint_path"),
+                        "batch_size": LaunchConfiguration("batch_size"),
+                        "split": LaunchConfiguration("split"),
+                        "mode": LaunchConfiguration("mode"),
+                        "learning_rate": LaunchConfiguration("learning_rate"),
+                        "resume": LaunchConfiguration("resume"),
+                        "save_every_epochs": LaunchConfiguration("save_every_epochs"),
+                        "image_size": LaunchConfiguration("image_size"),
+                        "use_mixed_precision": LaunchConfiguration("use_mixed_precision"),
+                    }
+                ],
             ),
         ]
     )
