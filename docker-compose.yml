@@ -42,6 +42,7 @@ services:
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONPYCACHEPREFIX: /tmp/isaacsim_pycache
       PYTHONUNBUFFERED: "1"
+      ISAACSIM_REPLICATOR_OUTPUT_DIR: /workspace/collect_vision_data_output
     stdin_open: true
     tty: true
     user: "1234:1234"
@@ -59,6 +60,7 @@ services:
         exec /isaac-sim/python.sh -m isaacsim_manager.manager
     volumes:
       - ./:/workspace:ro
+      - ./collect_vision_data_output:/workspace/collect_vision_data_output:rw
       - ${HOME}/.Xauthority:/isaac-sim/.Xauthority:ro
       - /tmp/.X11-unix:/tmp/.X11-unix:rw
       - ./.docker/isaacsim/cache/main:/isaac-sim/.cache

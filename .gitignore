@@ -5,3 +5,5 @@ __pycache__/
 *.pyc
 .codex
 .docker/
+collect_vision_data_output/*
+!collect_vision_data_output/.gitkeep
