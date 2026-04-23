@@ -7,7 +7,7 @@ NUM_QUERIES = 64
 LATENT_DIM = 4
 PATCH_SIZE = 32
 HIDDEN_DIM = 96
-IDENTITY_ALPHA_EPSILON = 1e-3
+IDENTITY_ALPHA_EPSILON = 0.5
 
 
 class QueryDepthIdentityModel(nn.Module):
@@ -46,7 +46,6 @@ class QueryDepthIdentityModel(nn.Module):
         decoded = self.decoder(queries, tokens)
         slot_params = self.slot_head(decoded)
 
-        presence_logits = slot_params[..., 0]
         centers = torch.tanh(slot_params[..., 1:3])
         depth = torch.sigmoid(slot_params[..., 3:4]) * 5.0
         sizes = torch.sigmoid(slot_params[..., 4:6]) * 0.08 + 0.015
@@ -56,11 +55,9 @@ class QueryDepthIdentityModel(nn.Module):
         patch_alpha_logits = self.patch_decoder(latent).view(
             batch_size, NUM_QUERIES, PATCH_SIZE, PATCH_SIZE
         )
-        presence = torch.sigmoid(presence_logits).unsqueeze(-1).unsqueeze(-1)
         patch_alpha = (
-            torch.sigmoid(patch_alpha_logits)
+            ((torch.tanh(patch_alpha_logits) + 1.0) * 0.5)
             * alpha_scale.squeeze(-1).unsqueeze(-1).unsqueeze(-1)
-            * presence
         )
 
         rendered_identity, rendered_depth, rendered_occupancy = render_billboards(
@@ -73,7 +70,6 @@ class QueryDepthIdentityModel(nn.Module):
             image_width=pixel_values.shape[-1],
         )
         return {
-            "presence_logits": presence_logits,
             "centers": centers,
             "depth": depth,
             "sizes": sizes,
@@ -128,8 +124,14 @@ def render_billboards(
     )
     sorted_depth = torch.gather(depth, 1, sorted_indices[:, :, None])
     sorted_depth = sorted_depth.unsqueeze(-1).expand(-1, -1, image_height, image_width)
-    sorted_identity = (
-        sorted_indices.to(sampled_alpha.dtype)[:, :, None, None].expand(
+    identity_indices = torch.argsort(depth.squeeze(-1), dim=1, descending=False)
+    identity_alpha = torch.gather(
+        sampled_alpha,
+        1,
+        identity_indices[:, :, None, None].expand(-1, -1, image_height, image_width),
+    )
+    identity_labels = (
+        identity_indices.to(sampled_alpha.dtype)[:, :, None, None].expand(
             -1, -1, image_height, image_width
         )
         + 1.0
@@ -144,22 +146,23 @@ def render_billboards(
     transmittance = torch.ones(
         batch_size, image_height, image_width, device=device, dtype=sampled_alpha.dtype
     )
-    assigned = torch.zeros(
-        batch_size, image_height, image_width, device=device, dtype=torch.bool
+    remaining_identity = torch.ones(
+        batch_size, image_height, image_width, device=device, dtype=sampled_alpha.dtype
     )
 
     for query_index in range(num_queries):
         alpha = sorted_alpha[:, query_index]
         contribution = alpha * transmittance
         rendered_depth = rendered_depth + contribution * sorted_depth[:, query_index]
-        newly_assigned = (contribution > IDENTITY_ALPHA_EPSILON) & (~assigned)
+        transmittance = transmittance * (1.0 - alpha)
+
+        claim_strength = identity_alpha[:, query_index] * remaining_identity
         rendered_identity = torch.where(
-            newly_assigned,
-            sorted_identity[:, query_index],
+            claim_strength > IDENTITY_ALPHA_EPSILON,
+            identity_labels[:, query_index],
             rendered_identity,
         )
-        assigned = assigned | newly_assigned
-        transmittance = transmittance * (1.0 - alpha)
+        remaining_identity = remaining_identity * (1.0 - identity_alpha[:, query_index])
 
     rendered_occupancy = (1.0 - transmittance).clamp(0.0, 1.0)
     visible_mask = rendered_occupancy > 0.05

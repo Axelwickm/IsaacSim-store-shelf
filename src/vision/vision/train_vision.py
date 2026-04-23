@@ -19,6 +19,7 @@ from vision.dataset import (
 )
 from vision.model import (
     HIDDEN_DIM,
+    IDENTITY_ALPHA_EPSILON,
     LATENT_DIM,
     NUM_QUERIES,
     PATCH_SIZE,
@@ -32,7 +33,7 @@ DEFAULT_CHECKPOINT_DIR = Path("/workspace/checkpoints/vision")
 DEFAULT_BATCH_SIZE = 8
 DEFAULT_SPLIT = "train"
 DEFAULT_MODE = "train"
-DEFAULT_LEARNING_RATE = 1e-4
+DEFAULT_LEARNING_RATE = 1e-5
 DEFAULT_LOG_EVERY = 10
 DEFAULT_MAX_EPOCHS = 1000
 DEFAULT_SAVE_EVERY_EPOCHS = 1
@@ -42,7 +43,8 @@ DISPLAY_INTERVAL_SECONDS = 5.0
 DEPTH_DISPLAY_MAX_METERS = 2.0
 DEPTH_LOSS_WEIGHT = 0.1
 IDENTITY_LOSS_WEIGHT = 1.0
-MISSED_OCCUPANCY_PENALTY_WEIGHT = 0.5
+MISSED_OCCUPANCY_PENALTY_WEIGHT = 1.0
+DEBUG_RENDER_STATS = True
 
 
 def _to_display_rgb(rgb_tensor) -> np.ndarray:
@@ -82,6 +84,49 @@ def _to_display_occupancy(occupancy_tensor) -> np.ndarray:
     occupancy = np.clip(occupancy, 0.0, 1.0)
     grayscale = (occupancy * 255.0).astype(np.uint8)
     return cv2.cvtColor(grayscale, cv2.COLOR_GRAY2BGR)
+
+
+def _log_render_debug_stats(
+    node: Node,
+    mode: str,
+    epoch_index: int,
+    global_step: int,
+    outputs: dict,
+    alpha_targets: torch.Tensor | None,
+) -> None:
+    patch_alpha_logits = outputs["patch_alpha_logits"].detach().float()
+    patch_alpha = outputs["patch_alpha"].detach().float()
+    predicted_occupancy = outputs["predicted_occupancy"].detach().float()
+    predicted_depth = outputs["predicted_depth"].detach().float()
+    sizes = outputs["sizes"].detach().float()
+    depths = outputs["depth"].detach().float()
+
+    occupancy_fill_fraction = (
+        (predicted_occupancy > 0.05).float().mean(dim=(-3, -2, -1))
+    )
+    log_message = (
+        f"[debug-render] mode={mode} epoch={epoch_index} step={global_step} "
+        f"logits_mean={patch_alpha_logits.mean().item():.4f} "
+        f"logits_std={patch_alpha_logits.std().item():.4f} "
+        f"alpha_mean={patch_alpha.mean().item():.4f} "
+        f"alpha_std={patch_alpha.std().item():.4f} "
+        f"alpha_min={patch_alpha.min().item():.4f} "
+        f"alpha_max={patch_alpha.max().item():.4f} "
+        f"size_mean=({sizes[..., 0].mean().item():.4f},{sizes[..., 1].mean().item():.4f}) "
+        f"depth_mean={depths.mean().item():.4f} "
+        f"occupancy_fill_mean={occupancy_fill_fraction.mean().item():.4f} "
+        f"occupancy_max={predicted_occupancy.max().item():.4f} "
+        f"depth_render_max={predicted_depth.max().item():.4f}"
+    )
+    node.get_logger().info(log_message)
+    if alpha_targets is not None:
+        target_fill_fraction = (
+            (alpha_targets.detach().float() > 0.5).float().mean(dim=(-2, -1))
+        )
+        node.get_logger().info(
+            f"[debug-render] alpha_target_fill_mean={target_fill_fraction.mean().item():.4f} "
+            f"alpha_target_fill_max={target_fill_fraction.max().item():.4f}"
+        )
 
 
 def _scale_for_display(image: np.ndarray) -> np.ndarray:
@@ -256,22 +301,21 @@ def _render_assigned_identity_for_display(
     rendered_identity = torch.zeros(
         image_height, image_width, device=device, dtype=torch.int64
     )
-    transmittance = torch.ones(image_height, image_width, device=device)
-    identity_epsilon = 1e-3
-
+    remaining_identity = torch.ones(
+        image_height, image_width, device=device, dtype=sampled_alpha.dtype
+    )
     for query_index in query_order.tolist():
         center_id = int(center_ids[query_index].item())
         if center_id <= 0:
             continue
         alpha = sampled_alpha[query_index]
-        contribution = alpha * transmittance
-        claim_mask = contribution > identity_epsilon
+        claim_strength = alpha * remaining_identity
         rendered_identity = torch.where(
-            claim_mask,
+            claim_strength > IDENTITY_ALPHA_EPSILON,
             torch.full_like(rendered_identity, center_id),
             rendered_identity,
         )
-        transmittance = transmittance * (1.0 - alpha)
+        remaining_identity = remaining_identity * (1.0 - alpha)
 
     return rendered_identity.cpu().numpy()
 
@@ -344,6 +388,7 @@ def main() -> None:
     }
     start_epoch = 0
     global_step = 0
+    logged_render_debug = False
 
     should_load_checkpoint = (mode == "train" and resume) or mode in {
         "eval",
@@ -427,11 +472,24 @@ def main() -> None:
                         missed_occupancy_penalty = (
                             gt_foreground.float() * (1.0 - predicted_occupancy)
                         ).mean()
+                        extra_occupancy_penalty = (
+                            (1.0 - gt_foreground.float()) * predicted_occupancy
+                        ).mean()
                         loss = (
                             DEPTH_LOSS_WEIGHT * depth_loss
                             + IDENTITY_LOSS_WEIGHT * identity_loss
                             + MISSED_OCCUPANCY_PENALTY_WEIGHT * missed_occupancy_penalty
                         )
+                    if DEBUG_RENDER_STATS and not logged_render_debug:
+                        _log_render_debug_stats(
+                            node,
+                            mode,
+                            epoch_index,
+                            global_step,
+                            outputs,
+                            alpha_targets,
+                        )
+                        logged_render_debug = True
                     scaler.scale(loss).backward()
                     scaler.step(optimizer)
                     scaler.update()
@@ -476,12 +534,26 @@ def main() -> None:
                             missed_occupancy_penalty = (
                                 gt_foreground.float() * (1.0 - predicted_occupancy)
                             ).mean()
+                            extra_occupancy_penalty = (
+                                (1.0 - gt_foreground.float()) * predicted_occupancy
+                            ).mean()
                             loss = (
                                 DEPTH_LOSS_WEIGHT * depth_loss
                                 + IDENTITY_LOSS_WEIGHT * identity_loss
                                 + MISSED_OCCUPANCY_PENALTY_WEIGHT
                                 * missed_occupancy_penalty
+                                * extra_occupancy_penalty
                             )
+                        if DEBUG_RENDER_STATS and not logged_render_debug:
+                            _log_render_debug_stats(
+                                node,
+                                mode,
+                                epoch_index,
+                                global_step,
+                                outputs,
+                                alpha_targets,
+                            )
+                            logged_render_debug = True
                 else:
                     model.eval()
                     with torch.no_grad():
@@ -490,6 +562,16 @@ def main() -> None:
                             enabled=use_mixed_precision and device.type == "cuda",
                         ):
                             outputs = model(pixel_values)
+                        if DEBUG_RENDER_STATS and not logged_render_debug:
+                            _log_render_debug_stats(
+                                node,
+                                mode,
+                                epoch_index,
+                                global_step,
+                                outputs,
+                                alpha_targets=None,
+                            )
+                            logged_render_debug = True
                         loss = outputs["predicted_depth"].sum() * 0.0
 
                 batch_loss = float(loss.detach().cpu())

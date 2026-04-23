@@ -39,7 +39,7 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "learning_rate",
-                default_value="0.0001",
+                default_value="0.00001",
                 description="AdamW learning rate used in train mode.",
             ),
             DeclareLaunchArgument(
