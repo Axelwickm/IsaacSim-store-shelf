@@ -2,12 +2,17 @@
 
 Minimal ROS 2 Jazzy Python workspace scaffold for the proper Isaac Sim + ROS 2 version of this project.
 
+NOTE: Only Nvidia GPU supported
+
 
 ## What This Starts With
 
 - A single Python ROS 2 package: `controller`
+- A Python ROS 2 motion package: `motion`
 - One executable script: `controller.py`
 - Docker Compose wired to a `ros:jazzy-ros-base`-derived image
+- MoveIt 2 installed in the ROS 2 container image
+- NVIDIA Isaac ROS cuMotion built from source in the ROS 2 container image
 
 ## Run
 
@@ -28,6 +33,38 @@ Pass simulation launch options as ROS launch arguments:
 ```bash
 docker compose run --rm ros2 bash -lc "source /opt/ros/jazzy/setup.bash && colcon build --symlink-install && source install/setup.bash && ros2 launch controller sim.launch.py headless:=true scene:=store_shelf.usd"
 ```
+
+## Motion Planning
+
+The workspace now includes a `motion` package with a planner scaffold node:
+
+```bash
+docker compose run --rm ros2 bash -lc "source /opt/ros/jazzy/setup.bash && colcon build --symlink-install && source install/setup.bash && ros2 launch motion motion.launch.py"
+```
+
+The image installs:
+
+- `ros-jazzy-moveit`
+
+The image also clones and builds `isaac_ros_cumotion` from source in `/opt/isaac_ros_cumotion_ws`, because the matching Jazzy Debian package is not currently available from NVIDIA's apt repository for this base image.
+
+The `motion` node currently validates that MoveIt and cuMotion are present in the environment, then listens for `geometry_msgs/msg/PoseStamped` goals on `/motion/target_pose`. It is the package where the vision-to-planning bridge and MoveIt request wiring should live next.
+
+## Robot Description
+
+The canonical YuMi source now lives in the ROS 2 package `src/yumi_description`.
+
+- Use the Xacro tree in `src/yumi_description/urdf` as the source of truth.
+- Treat `usd/robot/yumi_isaacsim.urdf` as a generated Isaac Sim artifact.
+- The checked-in YuMi USD is no longer the default robot source.
+- Isaac Sim imports the generated URDF directly into the live stage at runtime.
+- If you change the YuMi Xacro or meshes, trigger regeneration of the Isaac-ready URDF with:
+
+```bash
+docker compose run --rm ros2 bash -lc "source /opt/ros/jazzy/setup.bash && colcon build --symlink-install && source install/setup.bash && ros2 run yumi_description export_isaacsim_urdf"
+```
+
+This keeps MoveIt and Isaac Sim derived from the same YuMi description instead of maintaining separate robot definitions by hand.
 
 ## Isaac Sim GUI
 
@@ -75,6 +112,12 @@ On hybrid Intel/NVIDIA laptops, the compose file also forces PRIME render offloa
 - Author: Rendevr
 - License: CC Attribution
 - Source: https://sketchfab.com/3d-models/supermarket-potato-chips-shelf-asset-4e4ccc3074f0474bbfa23611c46a4029
+
+### ABB YuMi Robot Assets
+
+- Source lineage: Orebro University `yumi` repository, previously vendored in `../PickerDemo/third_party/yumi`
+- Canonical local robot package: `src/yumi_description`
+- License: BSD-2-Clause-style text in `src/yumi_description/LICENSE`
 
 ## Troubleshooting
 

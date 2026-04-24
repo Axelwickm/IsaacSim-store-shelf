@@ -141,6 +141,14 @@ def main() -> None:
         rclpy.shutdown()
         sys.exit(1)
 
+    if command_param:
+        node.get_logger().info(
+            f"One-shot command {command_name!r} completed; exiting controller"
+        )
+        node.destroy_node()
+        rclpy.shutdown()
+        return
+
     node.get_logger().info("Controller is running")
 
     try:

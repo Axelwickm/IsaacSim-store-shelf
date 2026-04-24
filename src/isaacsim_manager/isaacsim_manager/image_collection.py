@@ -20,6 +20,22 @@ SIMULATION_STEP_SECONDS = 1.0 / 60.0
 _prepare_next_capture = None
 _replicator_capture_enabled = False
 _capture_settle_time_remaining = 0.0
+_timeline_autoplay_enabled = False
+_scene_randomization_enabled = False
+
+
+def _play_timeline_if_needed() -> bool:
+    if not _timeline_autoplay_enabled:
+        return False
+
+    import omni.timeline
+
+    timeline = omni.timeline.get_timeline_interface()
+    if timeline.is_playing():
+        return False
+
+    timeline.play()
+    return True
 
 
 def _randomize_scene(item_pools: list[list], cart_prim, cart_base_translation) -> None:
@@ -82,34 +98,50 @@ def update_simulation_app(simulation_app) -> None:
     global _capture_settle_time_remaining
 
     simulation_app.update()
-    if not _replicator_capture_enabled:
+    if not _scene_randomization_enabled:
         return
-
-    import omni.replicator.core as rep
 
     _capture_settle_time_remaining -= SIMULATION_STEP_SECONDS
     if _capture_settle_time_remaining > 0.0:
         return
 
-    rep.orchestrator.step(rt_subframes=1)
+    if _replicator_capture_enabled:
+        import omni.replicator.core as rep
+
+        rep.orchestrator.step(rt_subframes=1)
     if _prepare_next_capture is not None:
         _prepare_next_capture()
     _capture_settle_time_remaining = random.uniform(0.0, MAX_CAPTURE_SETTLE_TIME_SECONDS)
 
 
-def _setup_store_shelf_scene(simulation_app, configuration: str, randomize: bool) -> str:
-    global _capture_settle_time_remaining, _prepare_next_capture, _replicator_capture_enabled
+def _setup_store_shelf_scene(
+    simulation_app,
+    configuration: str,
+    randomize: bool,
+    capture_enabled: bool,
+) -> str:
+    global _capture_settle_time_remaining
+    global _prepare_next_capture
+    global _replicator_capture_enabled
+    global _timeline_autoplay_enabled
+    global _scene_randomization_enabled
 
     _prepare_next_capture = None
     _replicator_capture_enabled = False
     _capture_settle_time_remaining = 0.0
+    _timeline_autoplay_enabled = False
+    _scene_randomization_enabled = False
 
     scene = construct_scene(configuration)
-    output_dir = _setup_replicator_capture(scene["stage"], scene["robot_prim_path"])
+    _timeline_autoplay_enabled = scene["ros2_joint_bridge"] is not None
+    output_dir = None
+    if capture_enabled:
+        output_dir = _setup_replicator_capture(scene["stage"], scene["robot_prim_path"])
     item_position_pools = []
     cart_x_offset = None
 
     if randomize:
+        _scene_randomization_enabled = True
         item_position_pools = build_item_position_pools(scene["stage"])
         _randomize_scene(
             item_position_pools,
@@ -134,14 +166,32 @@ def _setup_store_shelf_scene(simulation_app, configuration: str, randomize: bool
         f"{scene['robot_prim_path']}",
         flush=True,
     )
+    if scene["ros2_joint_bridge"] is not None:
+        print(
+            "[store_shelf] ROS 2 joint bridge topics: "
+            f"joint_states={scene['ros2_joint_bridge']['joint_state_topic']}, "
+            f"joint_command={scene['ros2_joint_bridge']['joint_command_topic']}, "
+            f"articulation_root={scene['ros2_joint_bridge']['articulation_root_path']}",
+            flush=True,
+        )
     if cart_x_offset is not None:
         print(f"[store_shelf] Initial cart x offset: {cart_x_offset:.3f}m", flush=True)
+    if _timeline_autoplay_enabled:
+        if _play_timeline_if_needed():
+            print(
+                "[store_shelf] Started Isaac Sim timeline for store_demo",
+                flush=True,
+            )
+        print(
+            "[store_shelf] Isaac Sim timeline autoplay enabled for store_demo",
+            flush=True,
+        )
 
     update_simulation_app(simulation_app)
     return (
         f"Loaded {configuration} scene {scene['scene_path']} with robot at "
         f"{scene['robot_prim_path']}; item_pools={len(item_position_pools)}; "
-        f"replicator_output={output_dir}"
+        f"replicator_output={output_dir or 'disabled'}"
     )
 
 
@@ -150,6 +200,7 @@ def collect_vision_data(simulation_app) -> str:
         simulation_app,
         configuration="collect_vision_data",
         randomize=True,
+        capture_enabled=True,
     )
 
 
@@ -158,4 +209,14 @@ def static(simulation_app) -> str:
         simulation_app,
         configuration="static",
         randomize=False,
+        capture_enabled=True,
+    )
+
+
+def store_demo(simulation_app) -> str:
+    return _setup_store_shelf_scene(
+        simulation_app,
+        configuration="store_demo",
+        randomize=True,
+        capture_enabled=False,
     )

@@ -1,0 +1,34 @@
+planning_plugins:
+  - ompl_interface/OMPLPlanner
+request_adapters:
+  - default_planning_request_adapters/ResolveConstraintFrames
+  - default_planning_request_adapters/ValidateWorkspaceBounds
+  - default_planning_request_adapters/CheckStartStateBounds
+  - default_planning_request_adapters/CheckStartStateCollision
+response_adapters:
+  - default_planning_response_adapters/AddTimeOptimalParameterization
+planner_configs:
+  RRTConnectkConfigDefault:
+    type: geometric::RRTConnect
+    range: 0.0
+left_arm:
+  planner_configs:
+    - RRTConnectkConfigDefault
+  projection_evaluator: joints(yumi_joint_1_l,yumi_joint_2_l)
+  longest_valid_segment_fraction: 0.005
+right_arm:
+  planner_configs:
+    - RRTConnectkConfigDefault
+  projection_evaluator: joints(yumi_joint_1_r,yumi_joint_2_r)
+  longest_valid_segment_fraction: 0.005
+both_arms:
+  planner_configs:
+    - RRTConnectkConfigDefault
+  projection_evaluator: joints(yumi_joint_1_l,yumi_joint_2_l)
+  longest_valid_segment_fraction: 0.005
+left_gripper:
+  planner_configs:
+    - RRTConnectkConfigDefault
+right_gripper:
+  planner_configs:
+    - RRTConnectkConfigDefault

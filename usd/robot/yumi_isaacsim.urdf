@@ -19,10 +19,10 @@
     <color rgba="1.0 1.0 0.94 1.0" />
   </material>
   <material name="Orange">
-    <color rgba="1.0 0.423529411765 0.0392156862745 1.0" />
+    <color rgba="1.0 0.4235294117647059 0.0392156862745098 1.0" />
   </material>
   <material name="Brown">
-    <color rgba="0.870588235294 0.811764705882 0.764705882353 1.0" />
+    <color rgba="0.8705882352941177 0.8117647058823529 0.7647058823529411 1.0" />
   </material>
   <material name="Red">
     <color rgba="0.8 0.0 0.0 1.0" />
@@ -39,26 +39,24 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/body.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/body.stl" />
       </geometry>
       <material name="Light_Grey" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/coarse/body.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/coarse/body.stl" />
       </geometry>
       <material name="Light_Grey" />
     </collision>
   </link>
-  
-  
   <joint name="yumi_joint_1_r" type="revolute">
     <parent link="yumi_body" />
     <child link="yumi_link_1_r" />
     <origin rpy="-0.9795   -0.5682   -2.3155" xyz="0.05355 -0.0725 0.41492" />
     <axis xyz="0 0 1" />
-    <limit effort="300" lower="-2.94087978961" upper="2.94087978961" velocity="3.14159265359" />
+    <limit effort="300" lower="-2.940879789610445" upper="2.940879789610445" velocity="3.141592653589793" />
     <dynamics damping="0.5" />
   </joint>
   <link name="yumi_link_1_r">
@@ -70,25 +68,24 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/link_1.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/link_1.stl" />
       </geometry>
       <material name="Grey" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/coarse/link_1.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/coarse/link_1.stl" />
       </geometry>
       <material name="Grey" />
     </collision>
   </link>
-  
   <joint name="yumi_joint_2_r" type="revolute">
     <parent link="yumi_link_1_r" />
     <child link="yumi_link_2_r" />
-    <origin rpy="1.57079632679 0.0 0.0" xyz="0.03 0.0 0.1" />
+    <origin rpy="1.5707963267948966 0.0 0.0" xyz="0.03 0.0 0.1" />
     <axis xyz="0 0 1" />
-    <limit effort="300" lower="-2.50454747661" upper="0.759218224618" velocity="3.14159265359" />
+    <limit effort="300" lower="-2.504547476611863" upper="0.7592182246175333" velocity="3.141592653589793" />
     <dynamics damping="0.5" />
   </joint>
   <link name="yumi_link_2_r">
@@ -100,25 +97,24 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/link_2.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/link_2.stl" />
       </geometry>
       <material name="Grey" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/coarse/link_2.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/coarse/link_2.stl" />
       </geometry>
       <material name="Grey" />
     </collision>
   </link>
-  
   <joint name="yumi_joint_7_r" type="revolute">
     <parent link="yumi_link_2_r" />
     <child link="yumi_link_3_r" />
-    <origin rpy="-1.57079632679 0.0 0.0" xyz="-0.03 0.17283 0.0" />
+    <origin rpy="-1.5707963267948966 0.0 0.0" xyz="-0.03 0.17283 0.0" />
     <axis xyz="0 0 1" />
-    <limit effort="300" lower="-2.94087978961" upper="2.94087978961" velocity="3.14159265359" />
+    <limit effort="300" lower="-2.940879789610445" upper="2.940879789610445" velocity="3.141592653589793" />
     <dynamics damping="0.5" />
   </joint>
   <link name="yumi_link_3_r">
@@ -130,25 +126,24 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/link_3.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/link_3.stl" />
       </geometry>
       <material name="Grey" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/coarse/link_3.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/coarse/link_3.stl" />
       </geometry>
       <material name="Grey" />
     </collision>
   </link>
-  
   <joint name="yumi_joint_3_r" type="revolute">
     <parent link="yumi_link_3_r" />
     <child link="yumi_link_4_r" />
-    <origin rpy="1.57079632679 -1.57079632679 0.0" xyz="-0.04188 0.0 0.07873" />
+    <origin rpy="1.5707963267948966 -1.5707963267948966 0.0" xyz="-0.04188 0.0 0.07873" />
     <axis xyz="0 0 1" />
-    <limit effort="300" lower="-2.15548162621" upper="1.3962634016" velocity="3.14159265359" />
+    <limit effort="300" lower="-2.155481626212997" upper="1.3962634015954636" velocity="3.141592653589793" />
     <dynamics damping="0.5" />
   </joint>
   <link name="yumi_link_4_r">
@@ -160,25 +155,24 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/link_4.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/link_4.stl" />
       </geometry>
       <material name="Grey" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/coarse/link_4.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/coarse/link_4.stl" />
       </geometry>
       <material name="Grey" />
     </collision>
   </link>
-  
   <joint name="yumi_joint_4_r" type="revolute">
     <parent link="yumi_link_4_r" />
     <child link="yumi_link_5_r" />
-    <origin rpy="-1.57079632679 0.0 0.0" xyz="0.0405 0.16461 0.0" />
+    <origin rpy="-1.5707963267948966 0.0 0.0" xyz="0.0405 0.16461 0.0" />
     <axis xyz="0 0 1" />
-    <limit effort="300" lower="-5.06145483078" upper="5.06145483078" velocity="6.98131700798" />
+    <limit effort="300" lower="-5.061454830783555" upper="5.061454830783555" velocity="6.981317007977318" />
     <dynamics damping="0.5" />
   </joint>
   <link name="yumi_link_5_r">
@@ -190,25 +184,24 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/link_5.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/link_5.stl" />
       </geometry>
       <material name="Grey" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/coarse/link_5.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/coarse/link_5.stl" />
       </geometry>
       <material name="Grey" />
     </collision>
   </link>
-  
   <joint name="yumi_joint_5_r" type="revolute">
     <parent link="yumi_link_5_r" />
     <child link="yumi_link_6_r" />
-    <origin rpy="1.57079632679 0.0 0.0" xyz="-0.027 0 0.10039" />
+    <origin rpy="1.5707963267948966 0.0 0.0" xyz="-0.027 0 0.10039" />
     <axis xyz="0 0 1" />
-    <limit effort="300" lower="-1.53588974176" upper="2.40855436775" velocity="6.98131700798" />
+    <limit effort="300" lower="-1.53588974175501" upper="2.4085543677521746" velocity="6.981317007977318" />
     <dynamics damping="0.5" />
   </joint>
   <link name="yumi_link_6_r">
@@ -220,25 +213,24 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/link_6.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/link_6.stl" />
       </geometry>
       <material name="Grey" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/coarse/link_6.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/coarse/link_6.stl" />
       </geometry>
       <material name="Grey" />
     </collision>
   </link>
-  
   <joint name="yumi_joint_6_r" type="revolute">
     <parent link="yumi_link_6_r" />
     <child link="yumi_link_7_r" />
-    <origin rpy="-1.57079632679 0.0 0.0" xyz="0.027 0.029 0.0" />
+    <origin rpy="-1.5707963267948966 0.0 0.0" xyz="0.027 0.029 0.0" />
     <axis xyz="0 0 1" />
-    <limit effort="300" lower="-3.99680398707" upper="3.99680398707" velocity="6.98131700798" />
+    <limit effort="300" lower="-3.9968039870670142" upper="3.9968039870670142" velocity="6.981317007977318" />
     <dynamics damping="0.5" />
   </joint>
   <link name="yumi_link_7_r">
@@ -250,26 +242,24 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/link_7.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/link_7.stl" />
       </geometry>
       <material name="Grey" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/coarse/link_7.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/coarse/link_7.stl" />
       </geometry>
       <material name="Grey" />
     </collision>
   </link>
-  
-  
   <joint name="yumi_joint_1_l" type="revolute">
     <parent link="yumi_body" />
     <child link="yumi_link_1_l" />
     <origin rpy="0.9781 -0.5716 2.3180" xyz="0.05355 0.07250 0.41492" />
     <axis xyz="0 0 1" />
-    <limit effort="300" lower="-2.94087978961" upper="2.94087978961" velocity="3.14159265359" />
+    <limit effort="300" lower="-2.940879789610445" upper="2.940879789610445" velocity="3.141592653589793" />
     <dynamics damping="0.5" />
   </joint>
   <link name="yumi_link_1_l">
@@ -281,25 +271,24 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/link_1.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/link_1.stl" />
       </geometry>
       <material name="Grey" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/coarse/link_1.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/coarse/link_1.stl" />
       </geometry>
       <material name="Grey" />
     </collision>
   </link>
-  
   <joint name="yumi_joint_2_l" type="revolute">
     <parent link="yumi_link_1_l" />
     <child link="yumi_link_2_l" />
-    <origin rpy="1.57079632679 0.0 0.0" xyz="0.03 0.0 0.1" />
+    <origin rpy="1.5707963267948966 0.0 0.0" xyz="0.03 0.0 0.1" />
     <axis xyz="0 0 1" />
-    <limit effort="300" lower="-2.50454747661" upper="0.759218224618" velocity="3.14159265359" />
+    <limit effort="300" lower="-2.504547476611863" upper="0.7592182246175333" velocity="3.141592653589793" />
     <dynamics damping="0.5" />
   </joint>
   <link name="yumi_link_2_l">
@@ -311,25 +300,24 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/link_2.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/link_2.stl" />
       </geometry>
       <material name="Grey" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/coarse/link_2.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/coarse/link_2.stl" />
       </geometry>
       <material name="Grey" />
     </collision>
   </link>
-  
   <joint name="yumi_joint_7_l" type="revolute">
     <parent link="yumi_link_2_l" />
     <child link="yumi_link_3_l" />
-    <origin rpy="-1.57079632679 0.0 0.0" xyz="-0.03 0.17283 0.0" />
+    <origin rpy="-1.5707963267948966 0.0 0.0" xyz="-0.03 0.17283 0.0" />
     <axis xyz="0 0 1" />
-    <limit effort="300" lower="-2.94087978961" upper="2.94087978961" velocity="3.14159265359" />
+    <limit effort="300" lower="-2.940879789610445" upper="2.940879789610445" velocity="3.141592653589793" />
     <dynamics damping="0.5" />
   </joint>
   <link name="yumi_link_3_l">
@@ -341,25 +329,24 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/link_3.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/link_3.stl" />
       </geometry>
       <material name="Grey" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/coarse/link_3.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/coarse/link_3.stl" />
       </geometry>
       <material name="Grey" />
     </collision>
   </link>
-  
   <joint name="yumi_joint_3_l" type="revolute">
     <parent link="yumi_link_3_l" />
     <child link="yumi_link_4_l" />
-    <origin rpy="1.57079632679 -1.57079632679 0.0" xyz="-0.04188 0.0 0.07873" />
+    <origin rpy="1.5707963267948966 -1.5707963267948966 0.0" xyz="-0.04188 0.0 0.07873" />
     <axis xyz="0 0 1" />
-    <limit effort="300" lower="-2.15548162621" upper="1.3962634016" velocity="3.14159265359" />
+    <limit effort="300" lower="-2.155481626212997" upper="1.3962634015954636" velocity="3.141592653589793" />
     <dynamics damping="0.5" />
   </joint>
   <link name="yumi_link_4_l">
@@ -371,25 +358,24 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/link_4.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/link_4.stl" />
       </geometry>
       <material name="Grey" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/coarse/link_4.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/coarse/link_4.stl" />
       </geometry>
       <material name="Grey" />
     </collision>
   </link>
-  
   <joint name="yumi_joint_4_l" type="revolute">
     <parent link="yumi_link_4_l" />
     <child link="yumi_link_5_l" />
-    <origin rpy="-1.57079632679 0.0 0.0" xyz="0.0405 0.16461 0.0" />
+    <origin rpy="-1.5707963267948966 0.0 0.0" xyz="0.0405 0.16461 0.0" />
     <axis xyz="0 0 1" />
-    <limit effort="300" lower="-5.06145483078" upper="5.06145483078" velocity="6.98131700798" />
+    <limit effort="300" lower="-5.061454830783555" upper="5.061454830783555" velocity="6.981317007977318" />
     <dynamics damping="0.5" />
   </joint>
   <link name="yumi_link_5_l">
@@ -401,25 +387,24 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/link_5.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/link_5.stl" />
       </geometry>
       <material name="Grey" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/coarse/link_5.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/coarse/link_5.stl" />
       </geometry>
       <material name="Grey" />
     </collision>
   </link>
-  
   <joint name="yumi_joint_5_l" type="revolute">
     <parent link="yumi_link_5_l" />
     <child link="yumi_link_6_l" />
-    <origin rpy="1.57079632679 0.0 0.0" xyz="-0.027 0 0.10039" />
+    <origin rpy="1.5707963267948966 0.0 0.0" xyz="-0.027 0 0.10039" />
     <axis xyz="0 0 1" />
-    <limit effort="300" lower="-1.53588974176" upper="2.40855436775" velocity="6.98131700798" />
+    <limit effort="300" lower="-1.53588974175501" upper="2.4085543677521746" velocity="6.981317007977318" />
     <dynamics damping="0.5" />
   </joint>
   <link name="yumi_link_6_l">
@@ -431,25 +416,24 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/link_6.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/link_6.stl" />
       </geometry>
       <material name="Grey" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/coarse/link_6.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/coarse/link_6.stl" />
       </geometry>
       <material name="Grey" />
     </collision>
   </link>
-  
   <joint name="yumi_joint_6_l" type="revolute">
     <parent link="yumi_link_6_l" />
     <child link="yumi_link_7_l" />
-    <origin rpy="-1.57079632679 0.0 0.0" xyz="0.027 0.029 0.0" />
+    <origin rpy="-1.5707963267948966 0.0 0.0" xyz="0.027 0.029 0.0" />
     <axis xyz="0 0 1" />
-    <limit effort="300" lower="-3.99680398707" upper="3.99680398707" velocity="6.98131700798" />
+    <limit effort="300" lower="-3.9968039870670142" upper="3.9968039870670142" velocity="6.981317007977318" />
     <dynamics damping="0.5" />
   </joint>
   <link name="yumi_link_7_l">
@@ -461,21 +445,20 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/link_7.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/link_7.stl" />
       </geometry>
       <material name="Grey" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/coarse/link_7.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/coarse/link_7.stl" />
       </geometry>
       <material name="Grey" />
     </collision>
   </link>
-  
   <joint name="yumi_link_7_r_joint" type="fixed">
-    <origin rpy="0 0 3.14159265359" xyz="0 0 0.007" />
+    <origin rpy="0 0 3.141592653589793" xyz="0 0 0.007" />
     <parent link="yumi_link_7_r" />
     <child link="gripper_r_base" />
   </joint>
@@ -488,19 +471,18 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/gripper/base.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/gripper/base.stl" />
       </geometry>
       <material name="Light_Grey" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/gripper/coarse/base.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/gripper/coarse/base.stl" />
       </geometry>
       <material name="Light_Grey" />
     </collision>
   </link>
-  
   <joint name="gripper_r_joint" type="prismatic">
     <parent link="gripper_r_base" />
     <child link="gripper_r_finger_r" />
@@ -518,23 +500,22 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/gripper/finger.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/gripper/finger.stl" />
       </geometry>
       <material name="Blue" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/gripper/coarse/finger.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/gripper/coarse/finger.stl" />
       </geometry>
       <material name="Blue" />
     </collision>
   </link>
-  
   <joint name="gripper_r_joint_m" type="prismatic">
     <parent link="gripper_r_base" />
     <child link="gripper_r_finger_l" />
-    <origin rpy="0 0 3.14159265359" xyz="0 0.0065 0.0837" />
+    <origin rpy="0 0 3.141592653589793" xyz="0 0.0065 0.0837" />
     <axis xyz="-1 0 0" />
     <limit effort="20" lower="0" upper="0.025" velocity="2" />
     <dynamics damping="1.0" />
@@ -549,21 +530,20 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/gripper/finger.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/gripper/finger.stl" />
       </geometry>
       <material name="Blue" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/gripper/coarse/finger.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/gripper/coarse/finger.stl" />
       </geometry>
       <material name="Blue" />
     </collision>
   </link>
-  
   <joint name="yumi_link_7_l_joint" type="fixed">
-    <origin rpy="0 0 3.14159265359" xyz="0 0 0.007" />
+    <origin rpy="0 0 3.141592653589793" xyz="0 0 0.007" />
     <parent link="yumi_link_7_l" />
     <child link="gripper_l_base" />
   </joint>
@@ -576,19 +556,18 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/gripper/base.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/gripper/base.stl" />
       </geometry>
       <material name="Light_Grey" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/gripper/coarse/base.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/gripper/coarse/base.stl" />
       </geometry>
       <material name="Light_Grey" />
     </collision>
   </link>
-  
   <joint name="gripper_l_joint" type="prismatic">
     <parent link="gripper_l_base" />
     <child link="gripper_l_finger_r" />
@@ -606,23 +585,22 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/gripper/finger.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/gripper/finger.stl" />
       </geometry>
       <material name="Blue" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/gripper/coarse/finger.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/gripper/coarse/finger.stl" />
       </geometry>
       <material name="Blue" />
     </collision>
   </link>
-  
   <joint name="gripper_l_joint_m" type="prismatic">
     <parent link="gripper_l_base" />
     <child link="gripper_l_finger_l" />
-    <origin rpy="0 0 3.14159265359" xyz="0 0.0065 0.0837" />
+    <origin rpy="0 0 3.141592653589793" xyz="0 0.0065 0.0837" />
     <axis xyz="-1 0 0" />
     <limit effort="20" lower="0" upper="0.025" velocity="2" />
     <dynamics damping="1.0" />
@@ -637,17 +615,16 @@
     <visual>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/gripper/finger.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/gripper/finger.stl" />
       </geometry>
       <material name="Blue" />
     </visual>
     <collision>
       <origin rpy="0 0 0" xyz="0 0 0" />
       <geometry>
-        <mesh filename="/home/axel/own/PickerDemo/third_party/yumi/yumi_description/meshes/gripper/coarse/finger.stl" />
+        <mesh filename="/workspace/src/yumi_description/meshes/gripper/coarse/finger.stl" />
       </geometry>
       <material name="Blue" />
     </collision>
   </link>
-  
-  </robot>
+</robot>

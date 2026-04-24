@@ -7,8 +7,8 @@ from launch_ros.substitutions import FindPackageShare
 
 def generate_launch_description() -> LaunchDescription:
     headless = LaunchConfiguration("headless")
-    isaac_launch = PathJoinSubstitution(
-        [FindPackageShare("controller"), "launch", "isaac.launch.py"]
+    sim_launch = PathJoinSubstitution(
+        [FindPackageShare("controller"), "launch", "sim.launch.py"]
     )
 
     return LaunchDescription(
@@ -19,10 +19,11 @@ def generate_launch_description() -> LaunchDescription:
                 description="Whether Isaac Sim should launch in headless mode.",
             ),
             IncludeLaunchDescription(
-                PythonLaunchDescriptionSource(isaac_launch),
+                PythonLaunchDescriptionSource(sim_launch),
                 launch_arguments={
                     "headless": headless,
                     "configuration": "static",
+                    "use_moveit": "false",
                 }.items(),
             ),
         ]

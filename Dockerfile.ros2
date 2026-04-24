@@ -1,36 +1,112 @@
-FROM ros:jazzy-ros-base
+FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
 
 SHELL ["/bin/bash", "-lc"]
 
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+ENV ROS_DISTRO=jazzy
+ENV CUDA_HOME=/usr/local/cuda
+ENV CUDAToolkit_ROOT=/usr/local/cuda
+ENV CMAKE_PREFIX_PATH=/opt/nvidia/vpi4:$CMAKE_PREFIX_PATH
+ENV TORCH_CUDA_ARCH_LIST="7.5;8.0;8.6;8.7;8.9;9.0"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    git \
+    gnupg \
+    locales \
+    lsb-release \
+    python3-pip \
+    software-properties-common \
+    wget \
+ && locale-gen en_US en_US.UTF-8 \
+ && update-locale LC_ALL=en_US.UTF-8 LANG=en_US.UTF-8 \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+    -o /usr/share/keyrings/ros-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu noble main" \
+    > /etc/apt/sources.list.d/ros2.list
+
+RUN wget -qO - https://repo.download.nvidia.com/jetson/jetson-ota-public.asc \
+    | gpg --dearmor -o /usr/share/keyrings/nvidia-jetson-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/nvidia-jetson-archive-keyring.gpg] https://repo.download.nvidia.com/jetson/x86_64/noble r38.4 main" \
+    > /etc/apt/sources.list.d/nvidia-vpi.list
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
     libgl1 \
     libglib2.0-0 \
-    python3-opencv \
-    python3-pip \
+    libnvvpi4 \
+    ninja-build \
     python3-colcon-common-extensions \
+    python3-opencv \
+    python3-rosdep \
+    ros-dev-tools \
+    ros-jazzy-cv-bridge \
     ros-jazzy-launch \
     ros-jazzy-launch-ros \
+    ros-jazzy-moveit \
+    ros-jazzy-moveit-common \
+    ros-jazzy-moveit-msgs \
+    ros-jazzy-moveit-planners-ompl \
+    ros-jazzy-moveit-resources-panda-description \
+    ros-jazzy-moveit-resources-panda-moveit-config \
     ros-jazzy-rclpy \
+    ros-jazzy-ros-base \
     ros-jazzy-ros2launch \
+    ros-jazzy-rviz2 \
     ros-jazzy-std-msgs \
+    ros-jazzy-ur-moveit-config \
+    ros-jazzy-ur-robot-driver \
+    ros-jazzy-vision-msgs \
+    ros-jazzy-xacro \
+    vpi4-dev \
     x11-apps \
  && rm -rf /var/lib/apt/lists/*
 
 RUN python3 -m pip install --no-cache-dir --break-system-packages \
     torch \
-    torchvision
+    torchvision \
+    --index-url https://download.pytorch.org/whl/cu126 \
+ && python3 -c "import torch; print(torch.__version__, torch.version.cuda)"
+
+WORKDIR /opt/isaac_ros_cumotion_ws/src
+
+RUN git clone --depth 1 --recurse-submodules --branch release-4.3 https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_cumotion.git \
+ && git clone --depth 1 --branch release-4.3 https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_common.git \
+ && git clone --depth 1 --branch release-4.3 https://github.com/NVIDIA-ISAAC-ROS/isaac_ros_nvblox.git
+
+WORKDIR /opt/isaac_ros_cumotion_ws
+
+RUN rosdep init || true \
+ && apt-get update \
+ && rosdep update \
+ && rosdep install \
+    --from-paths src/isaac_ros_cumotion/isaac_ros_cumotion src/isaac_ros_cumotion/isaac_ros_cumotion_moveit \
+    --ignore-src -r -y
+
+RUN source /opt/ros/jazzy/setup.bash \
+ && colcon build --symlink-install --packages-up-to isaac_ros_cumotion_moveit
 
 WORKDIR /workspace
 
 RUN printf '%s\n' \
-    'source /opt/ros/jazzy/setup.bash' \
-    'if [ -d /workspace/src ] && [ ! -f /workspace/install/setup.bash ]; then' \
-    '  echo "Building ROS workspace with colcon build --symlink-install..."' \
-    '  (cd /workspace && colcon build --symlink-install)' \
-    'fi' \
-    'if [ -f /workspace/install/setup.bash ]; then' \
-    '  source /workspace/install/setup.bash' \
-    'fi' \
-    >> /etc/bash.bashrc
+  'source /opt/ros/jazzy/setup.bash' \
+  'if [ -f /opt/isaac_ros_cumotion_ws/install/setup.bash ]; then' \
+  '  source /opt/isaac_ros_cumotion_ws/install/setup.bash' \
+  'fi' \
+  'if [ -d /workspace/src ] && [ ! -f /workspace/install/setup.bash ]; then' \
+  '  echo "Building ROS workspace with colcon build --symlink-install..."' \
+  '  (cd /workspace && colcon build --symlink-install)' \
+  'fi' \
+  'if [ -f /workspace/install/setup.bash ]; then' \
+  '  source /workspace/install/setup.bash' \
+  'fi' \
+  >> /etc/bash.bashrc
 
-CMD ["bash", "-lc", "source /opt/ros/jazzy/setup.bash && colcon build --symlink-install && source install/setup.bash && ros2 launch controller sim.launch.py"]
+CMD ["bash", "-lc", "source /opt/ros/jazzy/setup.bash && source /opt/isaac_ros_cumotion_ws/install/setup.bash && colcon build --symlink-install && source install/setup.bash && ros2 launch controller sim.launch.py"]

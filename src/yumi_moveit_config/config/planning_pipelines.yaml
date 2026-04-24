@@ -1,0 +1,5 @@
+planning_pipelines:
+  - ompl
+  - isaac_ros_cumotion
+
+default_planning_pipeline: ompl

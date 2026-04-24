@@ -1,16 +1,18 @@
 import os
 import random
+import shutil
 from pathlib import Path
 
 
 DEFAULT_COLLECT_VISION_SCENE = "/workspace/usd/store_scene.usdc"
-DEFAULT_ROBOT_PATH = "/workspace/usd/robot/yumi.usd"
+DEFAULT_ROBOT_PATH = "/workspace/usd/robot/yumi_isaacsim.urdf"
 ROBOT_PRIM_NAME = "YuMi"
 ITEMS_PRIM_NAME = "all_items"
 CART_PRIM_NAME = "Cart"
 SHELF_PRIM_NAME = "Shelf"
 VISION_CAMERA_PRIM_NAME = "VisionCamera"
 ITEM_MASS_KG = 0.2
+ROS2_JOINT_GRAPH_PATH = "/ActionGraph/ROS2JointBridge"
 
 
 def find_prim_named(stage, name: str):
@@ -53,8 +55,21 @@ def open_scene(scene_path: str):
     if not scene_file.exists():
         raise FileNotFoundError(f"Scene USD does not exist: {scene_file}")
 
-    if not omni.usd.get_context().open_stage(str(scene_file)):
-        raise RuntimeError(f"Failed to open Isaac Sim scene: {scene_file}")
+    runtime_root = Path("/tmp/isaacsim_runtime")
+    runtime_root.mkdir(parents=True, exist_ok=True)
+
+    # Preserve the scene's directory layout so relative USD asset paths
+    # (for example ./textures/*) still resolve after opening the runtime copy.
+    source_scene_dir = scene_file.parent
+    runtime_scene_dir = runtime_root / source_scene_dir.name
+    shutil.copytree(source_scene_dir, runtime_scene_dir, dirs_exist_ok=True)
+    runtime_scene_file = runtime_scene_dir / scene_file.name
+
+    if not omni.usd.get_context().open_stage(str(runtime_scene_file)):
+        raise RuntimeError(
+            f"Failed to open Isaac Sim scene: {scene_file} "
+            f"(runtime copy {runtime_scene_file})"
+        )
 
     stage = omni.usd.get_context().get_stage()
     if stage is None:
@@ -62,27 +77,118 @@ def open_scene(scene_path: str):
     return stage
 
 
+def _import_robot_urdf(urdf_path: Path, dest_path: str) -> tuple[str, str]:
+    import omni.kit.commands
+    import omni.usd
+    from isaacsim.asset.importer.urdf import _urdf
+    from pxr import Sdf
+
+    import_config = _urdf.ImportConfig()
+    import_config.set_fix_base(True)
+    import_config.set_make_default_prim(True)
+    import_config.set_create_physics_scene(False)
+    import_config.set_self_collision(True)
+    import_config.set_parse_mimic(True)
+    import_config.set_merge_fixed_joints(False)
+    import_config.set_convex_decomp(False)
+    import_config.set_collision_from_visuals(False)
+    import_config.set_import_inertia_tensor(True)
+    import_config.set_density(0.0)
+    import_config.set_distance_scale(1.0)
+
+    result, robot_model = omni.kit.commands.execute(
+        "URDFParseFile",
+        urdf_path=str(urdf_path),
+        import_config=import_config,
+    )
+    if not result:
+        raise RuntimeError(f"Failed to parse robot URDF: {urdf_path}")
+
+    result, imported_prim_path = omni.kit.commands.execute(
+        "URDFImportRobot",
+        urdf_robot=robot_model,
+        import_config=import_config,
+    )
+    if not result:
+        raise RuntimeError(f"Failed to import robot URDF: {urdf_path}")
+
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        raise RuntimeError("URDF import succeeded but no USD stage is available")
+
+    imported_prim_path = str(imported_prim_path or "")
+    if not imported_prim_path:
+        raise RuntimeError("URDF import did not return a robot prim path")
+
+    imported_prim = stage.GetPrimAtPath(imported_prim_path)
+    if not imported_prim.IsValid():
+        raise RuntimeError(
+            f"URDF import returned invalid robot prim path: {imported_prim_path}"
+        )
+
+    if imported_prim_path != dest_path:
+        result = omni.kit.commands.execute(
+            "MovePrimCommand",
+            path_from=imported_prim_path,
+            path_to=dest_path,
+            keep_world_transform=True,
+        )
+        move_succeeded = result[0] if isinstance(result, tuple) else bool(result)
+        if not move_succeeded:
+            raise RuntimeError(
+                f"Failed to move imported robot prim from {imported_prim_path} to {dest_path}"
+            )
+
+    final_prim = stage.GetPrimAtPath(dest_path)
+    if not final_prim.IsValid():
+        final_prim = stage.GetPrimAtPath(imported_prim_path)
+    if not final_prim.IsValid():
+        raise RuntimeError(
+            f"Robot prim is missing after URDF import: {imported_prim_path}"
+        )
+
+    return str(final_prim.GetPath()), str(imported_prim_path)
+
+
 def add_robot_at_cart_origin(stage, robot_path: str) -> str:
+    import omni.kit.app
     from pxr import UsdGeom
 
     robot_file = Path(robot_path)
     if not robot_file.exists():
-        raise FileNotFoundError(f"Robot USD does not exist: {robot_file}")
+        raise FileNotFoundError(f"Robot asset does not exist: {robot_file}")
 
     cart_prim = find_prim_named(stage, CART_PRIM_NAME)
     if cart_prim is None:
         raise RuntimeError("Could not find Cart prim in loaded scene")
 
     robot_prim_path = cart_prim.GetPath().AppendChild(ROBOT_PRIM_NAME)
-    robot_prim = stage.DefinePrim(robot_prim_path, "Xform")
-    robot_prim.GetReferences().ClearReferences()
-    robot_prim.GetReferences().AddReference(str(robot_file))
+    if robot_file.suffix.lower() != ".urdf":
+        raise RuntimeError(
+            f"Robot asset must be a URDF for direct import, got: {robot_file}"
+        )
+
+    imported_path, articulation_hint = _import_robot_urdf(
+        robot_file, dest_path=robot_prim_path.pathString
+    )
+    print(
+        f"[store_shelf] Directly imported URDF into scene at {imported_path} "
+        f"(articulation_hint={articulation_hint})",
+        flush=True,
+    )
+    robot_prim = stage.GetPrimAtPath(imported_path)
+    if not robot_prim.IsValid():
+        raise RuntimeError(
+            f"URDF import reported success but robot prim is missing: {imported_path}"
+        )
 
     robot_xform = UsdGeom.Xformable(robot_prim)
     robot_xform.ClearXformOpOrder()
     robot_xform.AddRotateZOp().Set(180.0)
     robot_xform.AddTranslateOp().Set((-0.40, 0.0, 0.0))
-    return robot_prim_path.pathString
+    # Let USD compose referenced robot contents before downstream traversal.
+    omni.kit.app.get_app().update()
+    return imported_path
 
 
 def add_robot_owned_camera(stage, robot_prim_path: str) -> str:
@@ -98,6 +204,134 @@ def add_robot_owned_camera(stage, robot_prim_path: str) -> str:
     camera_xform.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, 0.8))
     camera_xform.AddRotateXYZOp().Set(Gf.Vec3f(70.0, 0.0, -90.0))
     return camera_path
+
+
+def find_articulation_root_prim_path(stage, robot_prim_path: str) -> str:
+    import omni.kit.app
+    from pxr import Sdf, Usd, UsdPhysics
+
+    robot_prim = stage.GetPrimAtPath(robot_prim_path)
+    if not robot_prim.IsValid():
+        raise RuntimeError(f"Robot prim is not valid: {robot_prim_path}")
+
+    # Imported URDF contents may not be traversable until a frame has advanced.
+    omni.kit.app.get_app().update()
+
+    articulation_paths = []
+    for prim in Usd.PrimRange(robot_prim):
+        if prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+            articulation_paths.append(prim.GetPath().pathString)
+
+    if articulation_paths:
+        print(
+            "[store_shelf] Articulation root candidates: "
+            + ", ".join(sorted(articulation_paths)),
+            flush=True,
+        )
+
+    if not articulation_paths:
+        fallback = f"{robot_prim_path}/root_joint"
+        fallback_prim = stage.GetPrimAtPath(fallback)
+        if fallback_prim.IsValid():
+            print(
+                f"[store_shelf] Falling back to inferred articulation root {fallback}",
+                flush=True,
+            )
+            return fallback
+        raise RuntimeError(
+            f"Could not find articulation root under imported robot prim: {robot_prim_path}"
+        )
+
+    articulation_paths.sort(key=len)
+    articulation_root = articulation_paths[0]
+    articulation_root_path = Sdf.Path(articulation_root)
+    parent_path = articulation_root_path.GetParentPath()
+    if (
+        not parent_path.isEmpty
+        and articulation_root_path.name == parent_path.name
+        and stage.GetPrimAtPath(parent_path).IsValid()
+    ):
+        normalized = parent_path.pathString
+        print(
+            f"[store_shelf] Normalizing duplicated articulation root path "
+            f"{articulation_root} -> {normalized}",
+            flush=True,
+        )
+        articulation_root = normalized
+    print(
+        f"[store_shelf] Resolved articulation root for {robot_prim_path} -> {articulation_root}",
+        flush=True,
+    )
+    return articulation_root
+
+
+def configure_ros2_joint_bridge(stage, robot_prim_path: str) -> dict[str, str]:
+    import omni.graph.core as og
+
+    joint_state_topic = os.environ.get("ISAACSIM_JOINT_STATE_TOPIC", "/joint_states").strip()
+    joint_command_topic = os.environ.get("ISAACSIM_JOINT_COMMAND_TOPIC", "/joint_command").strip()
+    node_namespace = os.environ.get("ISAACSIM_ROS2_NODE_NAMESPACE", "").strip()
+    print(
+        f"[store_shelf] Resolving articulation root under {robot_prim_path} for ROS 2 joint bridge",
+        flush=True,
+    )
+    articulation_root_path = find_articulation_root_prim_path(stage, robot_prim_path)
+
+    og.Controller.edit(
+        {"graph_path": ROS2_JOINT_GRAPH_PATH, "evaluator_name": "execution"},
+        {
+            og.Controller.Keys.CREATE_NODES: [
+                ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
+                ("ReadSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
+                ("PublishJointState", "isaacsim.ros2.bridge.ROS2PublishJointState"),
+                ("SubscribeJointState", "isaacsim.ros2.bridge.ROS2SubscribeJointState"),
+                ("ArticulationController", "isaacsim.core.nodes.IsaacArticulationController"),
+            ],
+            og.Controller.Keys.CONNECT: [
+                ("OnPlaybackTick.outputs:tick", "PublishJointState.inputs:execIn"),
+                ("OnPlaybackTick.outputs:tick", "SubscribeJointState.inputs:execIn"),
+                ("ReadSimTime.outputs:simulationTime", "PublishJointState.inputs:timeStamp"),
+                ("SubscribeJointState.outputs:execOut", "ArticulationController.inputs:execIn"),
+                (
+                    "SubscribeJointState.outputs:jointNames",
+                    "ArticulationController.inputs:jointNames",
+                ),
+                (
+                    "SubscribeJointState.outputs:positionCommand",
+                    "ArticulationController.inputs:positionCommand",
+                ),
+                (
+                    "SubscribeJointState.outputs:velocityCommand",
+                    "ArticulationController.inputs:velocityCommand",
+                ),
+                (
+                    "SubscribeJointState.outputs:effortCommand",
+                    "ArticulationController.inputs:effortCommand",
+                ),
+            ],
+            og.Controller.Keys.SET_VALUES: [
+                ("PublishJointState.inputs:targetPrim", [articulation_root_path]),
+                ("PublishJointState.inputs:topicName", joint_state_topic),
+                ("SubscribeJointState.inputs:topicName", joint_command_topic),
+                ("ArticulationController.inputs:robotPath", articulation_root_path),
+                ("PublishJointState.inputs:nodeNamespace", node_namespace),
+                ("SubscribeJointState.inputs:nodeNamespace", node_namespace),
+            ],
+        },
+    )
+
+    print(
+        "[store_shelf] Configured Isaac Sim ROS 2 joint bridge "
+        f"(joint_states={joint_state_topic}, joint_command={joint_command_topic}, "
+        f"articulation_root={articulation_root_path})",
+        flush=True,
+    )
+    return {
+        "joint_state_topic": joint_state_topic,
+        "joint_command_topic": joint_command_topic,
+        "node_namespace": node_namespace,
+        "articulation_root_path": articulation_root_path,
+    }
 
 
 def configure_scene_physics(stage) -> None:
@@ -252,6 +486,9 @@ def construct_scene(configuration: str) -> dict:
         raise RuntimeError("Could not find Cart prim in loaded scene")
 
     robot_prim_path = add_robot_at_cart_origin(stage, robot_path)
+    ros2_joint_bridge = None
+    if configuration == "store_demo":
+        ros2_joint_bridge = configure_ros2_joint_bridge(stage, robot_prim_path)
     cart_base_translation = prim_local_translation(cart_prim)
 
     return {
@@ -259,6 +496,7 @@ def construct_scene(configuration: str) -> dict:
         "scene_path": scene_path,
         "robot_path": robot_path,
         "robot_prim_path": robot_prim_path,
+        "ros2_joint_bridge": ros2_joint_bridge,
         "cart_prim": cart_prim,
         "cart_base_translation": cart_base_translation,
     }

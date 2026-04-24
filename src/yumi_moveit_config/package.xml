@@ -1,0 +1,25 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>yumi_moveit_config</name>
+  <version>0.0.0</version>
+  <description>MoveIt configuration package for ABB YuMi in Isaac Sim store shelf.</description>
+  <maintainer email="axel@example.com">axel</maintainer>
+  <license>BSD-2-Clause</license>
+
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <depend>launch</depend>
+  <depend>launch_ros</depend>
+  <depend>moveit_configs_utils</depend>
+  <depend>moveit_ros_move_group</depend>
+  <depend>robot_state_publisher</depend>
+  <depend>rviz2</depend>
+  <depend>xacro</depend>
+  <depend>yumi_description</depend>
+
+  <exec_depend>ros2launch</exec_depend>
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>
