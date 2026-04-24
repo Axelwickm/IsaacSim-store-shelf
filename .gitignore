@@ -7,3 +7,5 @@ __pycache__/
 .docker/
 collect_vision_data_output/*
 !collect_vision_data_output/.gitkeep
+checkpoints/*
+!checkpoints/.gitkeep
