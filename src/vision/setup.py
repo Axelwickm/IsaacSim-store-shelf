@@ -29,6 +29,7 @@ setup(
     entry_points={
         "console_scripts": [
             "train_vision = vision.train_vision:main",
+            "vision_inference = vision.inference:main",
             "view_dataset = vision.view_dataset:main",
         ],
     },

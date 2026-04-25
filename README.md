@@ -34,6 +34,8 @@ Pass simulation launch options as ROS launch arguments:
 docker compose run --rm ros2 bash -lc "source /opt/ros/jazzy/setup.bash && colcon build --symlink-install && source install/setup.bash && ros2 launch controller sim.launch.py headless:=true scene:=store_shelf.usd"
 ```
 
+The default `ros2` compose service does not request a GPU. Use it for normal shell access, builds, and CPU-only ROS 2 work when the host NVIDIA runtime is unavailable. Use `ros2-gpu` only for commands that need CUDA on a host with a working NVIDIA driver stack.
+
 ## Motion Planning
 
 The workspace now includes a `motion` package with a planner scaffold node:
@@ -47,6 +49,12 @@ The image installs:
 - `ros-jazzy-moveit`
 
 The image also clones and builds `isaac_ros_cumotion` from source in `/opt/isaac_ros_cumotion_ws`, because the matching Jazzy Debian package is not currently available from NVIDIA's apt repository for this base image.
+
+For GPU-backed motion planning tools, use the GPU-enabled ROS 2 service explicitly:
+
+```bash
+docker compose run --rm ros2-gpu bash
+```
 
 The `motion` node currently validates that MoveIt and cuMotion are present in the environment, then listens for `geometry_msgs/msg/PoseStamped` goals on `/motion/target_pose`. It is the package where the vision-to-planning bridge and MoveIt request wiring should live next.
 

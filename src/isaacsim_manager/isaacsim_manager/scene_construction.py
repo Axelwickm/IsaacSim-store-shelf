@@ -10,9 +10,36 @@ ROBOT_PRIM_NAME = "YuMi"
 ITEMS_PRIM_NAME = "all_items"
 CART_PRIM_NAME = "Cart"
 SHELF_PRIM_NAME = "Shelf"
-VISION_CAMERA_PRIM_NAME = "VisionCamera"
+DEFAULT_CART_Y = -1.0
+DEFAULT_ROBOT_RELATIVE_X = 0.1
+VISION_CAMERA_LINK_PRIM_NAME = "vision_camera_link"
+VISION_CAMERA_OPTICAL_FRAME_PRIM_NAME = "vision_camera_optical_frame"
 ITEM_MASS_KG = 0.2
 ROS2_JOINT_GRAPH_PATH = "/ActionGraph/ROS2JointBridge"
+ROS2_CAMERA_GRAPH_PATH = "/ActionGraph/ROS2CameraBridge"
+ROS2_DYNAMIC_TF_GRAPH_PATH = "/ActionGraph/ROS2DynamicTF"
+ROS2_STATIC_TF_GRAPH_PATH = "/ActionGraph/ROS2StaticTF"
+DEFAULT_CAMERA_TOPIC = "/camera/image_raw"
+DEFAULT_CAMERA_INFO_TOPIC = "/camera/camera_info"
+DEFAULT_CAMERA_FRAME_ID = VISION_CAMERA_OPTICAL_FRAME_PRIM_NAME
+DEFAULT_CAMERA_RESOLUTION = 512
+ROBOT_CAMERA_MOUNT_PRIM_CANDIDATES = ("yumi_base_link", "yumi_body")
+YUMI_ARM_JOINT_LIMITS_RAD = {
+    "yumi_joint_1_r": (-2.940879789610445, 2.940879789610445),
+    "yumi_joint_2_r": (-2.504547476611863, 0.7592182246175333),
+    "yumi_joint_7_r": (-2.940879789610445, 2.940879789610445),
+    "yumi_joint_3_r": (-2.155481626212997, 1.3962634015954636),
+    "yumi_joint_4_r": (-5.061454830783555, 5.061454830783555),
+    "yumi_joint_5_r": (-1.53588974175501, 2.4085543677521746),
+    "yumi_joint_6_r": (-3.9968039870670142, 3.9968039870670142),
+    "yumi_joint_1_l": (-2.940879789610445, 2.940879789610445),
+    "yumi_joint_2_l": (-2.504547476611863, 0.7592182246175333),
+    "yumi_joint_7_l": (-2.940879789610445, 2.940879789610445),
+    "yumi_joint_3_l": (-2.155481626212997, 1.3962634015954636),
+    "yumi_joint_4_l": (-5.061454830783555, 5.061454830783555),
+    "yumi_joint_5_l": (-1.53588974175501, 2.4085543677521746),
+    "yumi_joint_6_l": (-3.9968039870670142, 3.9968039870670142),
+}
 
 
 def find_prim_named(stage, name: str):
@@ -185,7 +212,7 @@ def add_robot_at_cart_origin(stage, robot_path: str) -> str:
     robot_xform = UsdGeom.Xformable(robot_prim)
     robot_xform.ClearXformOpOrder()
     robot_xform.AddRotateZOp().Set(180.0)
-    robot_xform.AddTranslateOp().Set((-0.40, 0.0, 0.0))
+    robot_xform.AddTranslateOp().Set((DEFAULT_ROBOT_RELATIVE_X, 0.0, 0.0))
     # Let USD compose referenced robot contents before downstream traversal.
     omni.kit.app.get_app().update()
     return imported_path
@@ -194,16 +221,207 @@ def add_robot_at_cart_origin(stage, robot_path: str) -> str:
 def add_robot_owned_camera(stage, robot_prim_path: str) -> str:
     from pxr import Gf, UsdGeom
 
-    camera_path = f"{robot_prim_path}/{VISION_CAMERA_PRIM_NAME}"
+    robot_mount_prim = None
+    for mount_prim_name in ROBOT_CAMERA_MOUNT_PRIM_CANDIDATES:
+        mount_prim_path = f"{robot_prim_path}/{mount_prim_name}"
+        candidate_prim = stage.GetPrimAtPath(mount_prim_path)
+        if candidate_prim.IsValid():
+            robot_mount_prim = candidate_prim
+            break
+    if robot_mount_prim is None:
+        raise RuntimeError(
+            "Could not find a valid robot camera mount prim under "
+            f"{robot_prim_path}; checked {ROBOT_CAMERA_MOUNT_PRIM_CANDIDATES!r}"
+        )
+
+    camera_link_path = (
+        f"{robot_mount_prim.GetPath().pathString}/{VISION_CAMERA_LINK_PRIM_NAME}"
+    )
+    camera_link = UsdGeom.Xform.Define(stage, camera_link_path)
+    camera_link_xform = UsdGeom.Xformable(camera_link.GetPrim())
+    camera_link_xform.ClearXformOpOrder()
+    camera_link_xform.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, 0.8))
+    camera_link_xform.AddRotateXYZOp().Set(Gf.Vec3f(-180.0, -30.0, -180.0))
+
+    camera_path = f"{camera_link_path}/{VISION_CAMERA_OPTICAL_FRAME_PRIM_NAME}"
     camera = UsdGeom.Camera.Define(stage, camera_path)
     camera.CreateFocalLengthAttr().Set(14.0)
     camera.CreateFocusDistanceAttr().Set(1.0)
+    camera.CreateClippingRangeAttr().Set(Gf.Vec2f(0.01, 1000000.0))
 
     camera_xform = UsdGeom.Xformable(camera.GetPrim())
     camera_xform.ClearXformOpOrder()
-    camera_xform.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, 0.8))
-    camera_xform.AddRotateXYZOp().Set(Gf.Vec3f(70.0, 0.0, -90.0))
+    camera_xform.AddRotateXYZOp().Set(Gf.Vec3f(-90.0, 0.0, -90.0))
+    print(
+        "[store_shelf] Mounted vision camera under "
+        f"{robot_mount_prim.GetPath().pathString}",
+        flush=True,
+    )
     return camera_path
+
+
+def configure_ros2_camera_bridge(stage, camera_prim_path: str, cart_prim_path: str) -> dict[str, str]:
+    import omni.graph.core as og
+    import omni.replicator.core as rep
+    import usdrt.Sdf
+
+    node_namespace = os.environ.get("ISAACSIM_ROS2_NODE_NAMESPACE", "").strip()
+    camera_topic = os.environ.get("ISAACSIM_CAMERA_TOPIC", DEFAULT_CAMERA_TOPIC).strip()
+    camera_info_topic = os.environ.get(
+        "ISAACSIM_CAMERA_INFO_TOPIC",
+        DEFAULT_CAMERA_INFO_TOPIC,
+    ).strip()
+    camera_frame_id = os.environ.get(
+        "ISAACSIM_CAMERA_FRAME_ID",
+        DEFAULT_CAMERA_FRAME_ID,
+    ).strip()
+    camera_resolution = int(
+        os.environ.get("ISAACSIM_CAMERA_RESOLUTION", str(DEFAULT_CAMERA_RESOLUTION)).strip()
+    )
+    queue_size = int(os.environ.get("ISAACSIM_CAMERA_QUEUE_SIZE", "1").strip())
+
+    camera_prim = stage.GetPrimAtPath(camera_prim_path)
+    if not camera_prim.IsValid():
+        raise RuntimeError(f"Camera prim is not valid: {camera_prim_path}")
+
+    camera_link_prim = camera_prim.GetParent()
+    if not camera_link_prim.IsValid():
+        raise RuntimeError(f"Camera link prim is not valid for camera: {camera_prim_path}")
+
+    camera_mount_parent_prim = camera_link_prim.GetParent()
+    if not camera_mount_parent_prim.IsValid():
+        raise RuntimeError(
+            f"Camera mount parent prim is not valid for camera link: {camera_link_prim.GetPath()}"
+        )
+
+    render_product = rep.create.render_product(
+        camera_prim_path,
+        (camera_resolution, camera_resolution),
+    )
+    render_product_path = getattr(render_product, "path", None) or str(render_product)
+
+    og.Controller.edit(
+        {"graph_path": ROS2_CAMERA_GRAPH_PATH, "evaluator_name": "execution"},
+        {
+            og.Controller.Keys.CREATE_NODES: [
+                ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
+                ("PublishImage", "isaacsim.ros2.bridge.ROS2CameraHelper"),
+                ("PublishCameraInfo", "isaacsim.ros2.bridge.ROS2CameraInfoHelper"),
+            ],
+            og.Controller.Keys.SET_VALUES: [
+                ("PublishImage.inputs:frameId", camera_frame_id),
+                ("PublishImage.inputs:topicName", camera_topic),
+                ("PublishImage.inputs:nodeNamespace", node_namespace),
+                ("PublishImage.inputs:queueSize", queue_size),
+                ("PublishImage.inputs:type", "rgb"),
+                ("PublishImage.inputs:renderProductPath", render_product_path),
+                ("PublishCameraInfo.inputs:frameId", camera_frame_id),
+                ("PublishCameraInfo.inputs:topicName", camera_info_topic),
+                ("PublishCameraInfo.inputs:nodeNamespace", node_namespace),
+                ("PublishCameraInfo.inputs:queueSize", queue_size),
+                ("PublishCameraInfo.inputs:renderProductPath", render_product_path),
+            ],
+            og.Controller.Keys.CONNECT: [
+                ("OnPlaybackTick.outputs:tick", "PublishImage.inputs:execIn"),
+                ("OnPlaybackTick.outputs:tick", "PublishCameraInfo.inputs:execIn"),
+            ],
+        },
+    )
+
+    og.Controller.edit(
+        {"graph_path": ROS2_DYNAMIC_TF_GRAPH_PATH, "evaluator_name": "execution"},
+        {
+            og.Controller.Keys.CREATE_NODES: [
+                ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
+                ("ReadSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
+                ("PublishDynamicTF", "isaacsim.ros2.bridge.ROS2PublishTransformTree"),
+            ],
+            og.Controller.Keys.SET_VALUES: [
+                ("PublishDynamicTF.inputs:topicName", "tf"),
+                (
+                    "PublishDynamicTF.inputs:targetPrims",
+                    [usdrt.Sdf.Path(cart_prim_path)],
+                ),
+                ("PublishDynamicTF.inputs:nodeNamespace", node_namespace),
+            ],
+            og.Controller.Keys.CONNECT: [
+                ("OnPlaybackTick.outputs:tick", "PublishDynamicTF.inputs:execIn"),
+                ("ReadSimTime.outputs:simulationTime", "PublishDynamicTF.inputs:timeStamp"),
+            ],
+        },
+    )
+
+    og.Controller.edit(
+        {"graph_path": ROS2_STATIC_TF_GRAPH_PATH, "evaluator_name": "execution"},
+        {
+            og.Controller.Keys.CREATE_NODES: [
+                ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
+                ("ReadSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
+                ("PublishCameraLinkTF", "isaacsim.ros2.bridge.ROS2PublishTransformTree"),
+                ("PublishCameraOpticalTF", "isaacsim.ros2.bridge.ROS2PublishTransformTree"),
+            ],
+            og.Controller.Keys.SET_VALUES: [
+                ("PublishCameraLinkTF.inputs:topicName", "tf_static"),
+                ("PublishCameraLinkTF.inputs:staticPublisher", True),
+                (
+                    "PublishCameraLinkTF.inputs:targetPrims",
+                    [usdrt.Sdf.Path(camera_link_prim.GetPath().pathString)],
+                ),
+                (
+                    "PublishCameraLinkTF.inputs:parentPrim",
+                    [usdrt.Sdf.Path(camera_mount_parent_prim.GetPath().pathString)],
+                ),
+                ("PublishCameraLinkTF.inputs:nodeNamespace", node_namespace),
+                ("PublishCameraOpticalTF.inputs:topicName", "tf_static"),
+                ("PublishCameraOpticalTF.inputs:staticPublisher", True),
+                (
+                    "PublishCameraOpticalTF.inputs:targetPrims",
+                    [usdrt.Sdf.Path(camera_prim.GetPath().pathString)],
+                ),
+                (
+                    "PublishCameraOpticalTF.inputs:parentPrim",
+                    [usdrt.Sdf.Path(camera_link_prim.GetPath().pathString)],
+                ),
+                ("PublishCameraOpticalTF.inputs:nodeNamespace", node_namespace),
+            ],
+            og.Controller.Keys.CONNECT: [
+                ("OnPlaybackTick.outputs:tick", "PublishCameraLinkTF.inputs:execIn"),
+                ("OnPlaybackTick.outputs:tick", "PublishCameraOpticalTF.inputs:execIn"),
+                ("ReadSimTime.outputs:simulationTime", "PublishCameraLinkTF.inputs:timeStamp"),
+                ("ReadSimTime.outputs:simulationTime", "PublishCameraOpticalTF.inputs:timeStamp"),
+            ],
+        },
+    )
+
+    print(
+        "[store_shelf] Configured Isaac Sim ROS 2 camera bridge "
+        f"(image={camera_topic}, camera_info={camera_info_topic}, "
+        f"frame_id={camera_frame_id}, resolution={camera_resolution}x{camera_resolution}, "
+        "publisher=builtin)",
+        flush=True,
+    )
+    print(
+        f"[store_shelf] Camera render product path: {render_product_path}",
+        flush=True,
+    )
+    print(
+        "[store_shelf] Configured Isaac Sim ROS 2 TF publishers "
+        f"(dynamic_prims={cart_prim_path}; "
+        f"camera_mount_parent={camera_mount_parent_prim.GetPath().pathString}; "
+        f"camera_link={camera_link_prim.GetPath().pathString}; "
+        f"camera_optical={camera_prim.GetPath().pathString})",
+        flush=True,
+    )
+    return {
+        "camera_topic": camera_topic,
+        "camera_info_topic": camera_info_topic,
+        "camera_frame_id": camera_frame_id,
+        "camera_prim_path": camera_prim_path,
+        "render_product_path": render_product_path,
+        "camera_link_prim_path": camera_link_prim.GetPath().pathString,
+        "cart_prim_path": cart_prim_path,
+        "node_namespace": node_namespace,
+    }
 
 
 def find_articulation_root_prim_path(stage, robot_prim_path: str) -> str:
@@ -435,6 +653,44 @@ def randomize_cart_x(cart_prim, base_translation: tuple[float, float, float]) ->
     return x_offset
 
 
+def randomize_robot_arm_joints(stage, robot_prim_path: str) -> dict[str, float]:
+    import math
+    from pxr import PhysxSchema, Usd, UsdPhysics
+
+    sampled_positions = {}
+    robot_prim = stage.GetPrimAtPath(robot_prim_path)
+    if not robot_prim.IsValid():
+        return sampled_positions
+
+    for prim in Usd.PrimRange(robot_prim):
+        joint_name = prim.GetName()
+        limits = YUMI_ARM_JOINT_LIMITS_RAD.get(joint_name)
+        if limits is None:
+            continue
+
+        lower, upper = limits
+        joint_position_rad = random.uniform(lower, upper)
+        joint_position_deg = math.degrees(joint_position_rad)
+        UsdPhysics.DriveAPI.Apply(prim, "angular").CreateTargetPositionAttr().Set(
+            joint_position_deg
+        )
+        PhysxSchema.JointStateAPI.Apply(prim, "angular").CreatePositionAttr().Set(
+            joint_position_deg
+        )
+        PhysxSchema.JointStateAPI.Apply(prim, "angular").CreateVelocityAttr().Set(0.0)
+        sampled_positions[joint_name] = joint_position_rad
+
+    print(
+        "[store_shelf] Randomized robot arm joints: "
+        + ", ".join(
+            f"{joint_name}={joint_position:.3f}rad"
+            for joint_name, joint_position in sorted(sampled_positions.items())
+        ),
+        flush=True,
+    )
+    return sampled_positions
+
+
 def set_semantic_label(prim, label: str) -> None:
     try:
         from pxr import Semantics
@@ -454,11 +710,15 @@ def set_semantic_label(prim, label: str) -> None:
 def apply_capture_semantics(stage, robot_prim_path: str) -> None:
     robot_prim = stage.GetPrimAtPath(robot_prim_path)
     if robot_prim.IsValid():
-        set_semantic_label(robot_prim, "robot")
+        set_semantic_label(robot_prim, "background")
 
     cart_prim = find_prim_named(stage, CART_PRIM_NAME)
     if cart_prim is not None:
-        set_semantic_label(cart_prim, "cart")
+        set_semantic_label(cart_prim, "background")
+
+    shelf_prim = find_prim_named(stage, SHELF_PRIM_NAME)
+    if shelf_prim is not None:
+        set_semantic_label(shelf_prim, "background")
 
     items_prim = find_prim_named(stage, ITEMS_PRIM_NAME)
     if items_prim is None:
@@ -484,11 +744,23 @@ def construct_scene(configuration: str) -> dict:
     cart_prim = find_prim_named(stage, CART_PRIM_NAME)
     if cart_prim is None:
         raise RuntimeError("Could not find Cart prim in loaded scene")
+    cart_translation = prim_local_translation(cart_prim)
+    set_prim_local_translation(
+        cart_prim,
+        (cart_translation[0], DEFAULT_CART_Y, cart_translation[2]),
+    )
 
     robot_prim_path = add_robot_at_cart_origin(stage, robot_path)
     ros2_joint_bridge = None
+    ros2_camera_bridge = None
     if configuration == "store_demo":
         ros2_joint_bridge = configure_ros2_joint_bridge(stage, robot_prim_path)
+        camera_prim_path = add_robot_owned_camera(stage, robot_prim_path)
+        ros2_camera_bridge = configure_ros2_camera_bridge(
+            stage,
+            camera_prim_path=camera_prim_path,
+            cart_prim_path=cart_prim.GetPath().pathString,
+        )
     cart_base_translation = prim_local_translation(cart_prim)
 
     return {
@@ -497,6 +769,7 @@ def construct_scene(configuration: str) -> dict:
         "robot_path": robot_path,
         "robot_prim_path": robot_prim_path,
         "ros2_joint_bridge": ros2_joint_bridge,
+        "ros2_camera_bridge": ros2_camera_bridge,
         "cart_prim": cart_prim,
         "cart_base_translation": cart_base_translation,
     }

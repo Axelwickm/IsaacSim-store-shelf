@@ -286,11 +286,16 @@ def _run_simulation_app(mode: str, configuration: str | None) -> None:
                 "isaacsim.ros2.bridge",
                 "--enable",
                 "isaacsim.core.nodes",
+                "--enable",
+                "omni.syntheticdata",
+                "--enable",
+                "omni.replicator.core",
             ]
         )
         print(
             "[isaacsim_manager] Enabling Isaac Sim ROS 2 bridge and core nodes "
-            "extensions (isaacsim.ros2.bridge, isaacsim.core.nodes)",
+            "extensions (isaacsim.ros2.bridge, isaacsim.core.nodes, "
+            "omni.syntheticdata, omni.replicator.core)",
             flush=True,
         )
     else:
@@ -299,6 +304,7 @@ def _run_simulation_app(mode: str, configuration: str | None) -> None:
             "ISAACSIM_ENABLE_ROS2_BRIDGE",
             flush=True,
         )
+    os.environ["ISAACSIM_RUNNER_MODE"] = mode
     simulation_app = SimulationApp(
         {"headless": mode == START_HEADLESS, "extra_args": extra_args}
     )
@@ -315,6 +321,8 @@ def _run_simulation_app(mode: str, configuration: str | None) -> None:
         while simulation_app.is_running():
             update_simulation_app(simulation_app)
     finally:
+        if rclpy.ok():
+            rclpy.shutdown()
         simulation_app.close()
 
 

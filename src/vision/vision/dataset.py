@@ -40,6 +40,35 @@ def _decode_instance_segmentation_ids(segmentation: np.ndarray) -> np.ndarray:
     )
 
 
+def _instance_id_from_mapping_key(raw_instance_id) -> int:
+    raw_numbers = re.findall(r"\d+", str(raw_instance_id)) + ["0", "0", "0"]
+    return (
+        int(raw_numbers[0])
+        + 256 * int(raw_numbers[1])
+        + 65536 * int(raw_numbers[2])
+    )
+
+
+def _semantic_name_from_labels(labels) -> str | None:
+    if isinstance(labels, dict):
+        return labels.get("class") or labels.get("label")
+    if isinstance(labels, list) and labels:
+        return labels[0]
+    if isinstance(labels, str):
+        return labels
+    return None
+
+
+def _item_instance_ids(semantics_mapping: dict) -> set[int]:
+    item_ids = set()
+    raw_labels = semantics_mapping.get("idToLabels", semantics_mapping)
+    for raw_instance_id, labels in raw_labels.items():
+        semantic_name = _semantic_name_from_labels(labels)
+        if semantic_name and semantic_name.strip().lower().startswith("item_group_"):
+            item_ids.add(_instance_id_from_mapping_key(raw_instance_id))
+    return item_ids
+
+
 def _semantic_name_to_class_id(name: str | None) -> int:
     if not name:
         return UNKNOWN_CLASS_ID
@@ -79,13 +108,22 @@ class StoreShelfVisionDataset(Dataset):
         sample_ids = []
         for path in sorted(self.dataset_dir.glob("rgb_*.png")):
             sample_id = path.stem.split("_")[-1]
+            split_key = self._sample_split_key(sample_id)
             if self._sample_exists(sample_id) and _split_matches(
-                sample_id,
+                split_key,
                 self.split,
                 self.train_split_threshold,
             ):
                 sample_ids.append(sample_id)
         return sample_ids
+
+    def _sample_split_key(self, sample_id: str) -> str:
+        metadata_path = self.dataset_dir / f"metadata_{sample_id}.json"
+        if not metadata_path.exists():
+            return sample_id
+        with open(metadata_path, "r", encoding="utf-8") as handle:
+            metadata = json.load(handle)
+        return str(metadata.get("run_id") or sample_id)
 
     def _sample_exists(self, sample_id: str) -> bool:
         required_paths = [
@@ -151,8 +189,20 @@ class StoreShelfVisionDataset(Dataset):
             encoding="utf-8",
         ) as handle:
             semantics_mapping = json.load(handle)
+        metadata_path = self.dataset_dir / f"metadata_{sample_id}.json"
+        metadata = {}
+        if metadata_path.exists():
+            with open(metadata_path, "r", encoding="utf-8") as handle:
+                metadata = json.load(handle)
 
         segmentation_ids = _decode_instance_segmentation_ids(segmentation)
+        item_ids = _item_instance_ids(semantics_mapping)
+        if item_ids:
+            segmentation_ids = np.where(
+                np.isin(segmentation_ids, list(item_ids)),
+                segmentation_ids,
+                BACKGROUND_CLASS_ID,
+            )
         return {
             "sample_id": sample_id,
             "split": self.split,
@@ -162,6 +212,7 @@ class StoreShelfVisionDataset(Dataset):
             "distance_to_camera": torch.from_numpy(depth).unsqueeze(0),
             "instance_mapping": instance_mapping,
             "semantics_mapping": semantics_mapping,
+            "metadata": metadata,
         }
 
 
@@ -179,6 +230,7 @@ def collate_vision_samples(batch: list[dict]) -> dict:
         ),
         "instance_mapping": [sample["instance_mapping"] for sample in batch],
         "semantics_mapping": [sample["semantics_mapping"] for sample in batch],
+        "metadata": [sample["metadata"] for sample in batch],
     }
 
 
@@ -202,12 +254,7 @@ def build_mask2former_batch_targets(batch: dict) -> tuple[list[torch.Tensor], li
             elif isinstance(labels, str):
                 semantic_name = labels
 
-            raw_numbers = re.findall(r"\d+", str(raw_instance_id)) + ["0", "0", "0"]
-            instance_id = (
-                int(raw_numbers[0])
-                + 256 * int(raw_numbers[1])
-                + 65536 * int(raw_numbers[2])
-            )
+            instance_id = _instance_id_from_mapping_key(raw_instance_id)
             instance_mask = instance_segmentation == instance_id
             if torch.any(instance_mask):
                 sample_masks.append(instance_mask.to(torch.float32))
