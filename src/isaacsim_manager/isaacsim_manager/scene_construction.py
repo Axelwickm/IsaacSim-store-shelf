@@ -23,22 +23,42 @@ DEFAULT_CAMERA_TOPIC = "/camera/image_raw"
 DEFAULT_CAMERA_INFO_TOPIC = "/camera/camera_info"
 DEFAULT_CAMERA_FRAME_ID = VISION_CAMERA_OPTICAL_FRAME_PRIM_NAME
 DEFAULT_CAMERA_RESOLUTION = 512
-ROBOT_CAMERA_MOUNT_PRIM_CANDIDATES = ("yumi_base_link", "yumi_body")
+ROBOT_PHYSICAL_ROOT_LINK_NAME = "yumi_body"
 YUMI_ARM_JOINT_LIMITS_RAD = {
-    "yumi_joint_1_r": (-2.940879789610445, 2.940879789610445),
-    "yumi_joint_2_r": (-2.504547476611863, 0.7592182246175333),
-    "yumi_joint_7_r": (-2.940879789610445, 2.940879789610445),
-    "yumi_joint_3_r": (-2.155481626212997, 1.3962634015954636),
-    "yumi_joint_4_r": (-5.061454830783555, 5.061454830783555),
-    "yumi_joint_5_r": (-1.53588974175501, 2.4085543677521746),
-    "yumi_joint_6_r": (-3.9968039870670142, 3.9968039870670142),
-    "yumi_joint_1_l": (-2.940879789610445, 2.940879789610445),
-    "yumi_joint_2_l": (-2.504547476611863, 0.7592182246175333),
-    "yumi_joint_7_l": (-2.940879789610445, 2.940879789610445),
-    "yumi_joint_3_l": (-2.155481626212997, 1.3962634015954636),
-    "yumi_joint_4_l": (-5.061454830783555, 5.061454830783555),
-    "yumi_joint_5_l": (-1.53588974175501, 2.4085543677521746),
-    "yumi_joint_6_l": (-3.9968039870670142, 3.9968039870670142),
+    # Match MoveIt's slightly tighter configured limits so randomized Isaac
+    # starts are always accepted by CheckStartStateBounds.
+    "yumi_joint_1_r": (-2.84, 2.84),
+    "yumi_joint_2_r": (-2.4, 0.65),
+    "yumi_joint_7_r": (-2.84, 2.84),
+    "yumi_joint_3_r": (-2.0, 1.29),
+    "yumi_joint_4_r": (-4.9, 4.9),
+    "yumi_joint_5_r": (-1.43, 2.3),
+    "yumi_joint_6_r": (-3.89, 3.89),
+    "yumi_joint_1_l": (-2.84, 2.84),
+    "yumi_joint_2_l": (-2.4, 0.65),
+    "yumi_joint_7_l": (-2.84, 2.84),
+    "yumi_joint_3_l": (-2.0, 1.29),
+    "yumi_joint_4_l": (-4.9, 4.9),
+    "yumi_joint_5_l": (-1.43, 2.3),
+    "yumi_joint_6_l": (-3.89, 3.89),
+}
+YUMI_STORE_DEMO_READY_JOINT_POSITIONS_RAD = {
+    # Keep the left arm parked away from the right arm, while the right arm starts
+    # roughly shelf-facing. These values are mirrored in config/yumi.srdf.
+    "yumi_joint_1_l": 2.4,
+    "yumi_joint_2_l": -0.6,
+    "yumi_joint_7_l": 0.2,
+    "yumi_joint_3_l": 0.2,
+    "yumi_joint_4_l": -1.2,
+    "yumi_joint_5_l": 0.3,
+    "yumi_joint_6_l": 0.0,
+    "yumi_joint_1_r": -1.2,
+    "yumi_joint_2_r": -0.8,
+    "yumi_joint_7_r": -0.4,
+    "yumi_joint_3_r": -0.6,
+    "yumi_joint_4_r": 1.2,
+    "yumi_joint_5_r": 0.8,
+    "yumi_joint_6_r": 0.0,
 }
 
 
@@ -108,7 +128,6 @@ def _import_robot_urdf(urdf_path: Path, dest_path: str) -> tuple[str, str]:
     import omni.kit.commands
     import omni.usd
     from isaacsim.asset.importer.urdf import _urdf
-    from pxr import Sdf
 
     import_config = _urdf.ImportConfig()
     import_config.set_fix_base(True)
@@ -158,7 +177,7 @@ def _import_robot_urdf(urdf_path: Path, dest_path: str) -> tuple[str, str]:
             "MovePrimCommand",
             path_from=imported_prim_path,
             path_to=dest_path,
-            keep_world_transform=True,
+            keep_world_transform=False,
         )
         move_succeeded = result[0] if isinstance(result, tuple) else bool(result)
         if not move_succeeded:
@@ -218,21 +237,25 @@ def add_robot_at_cart_origin(stage, robot_path: str) -> str:
     return imported_path
 
 
+def get_robot_physical_root_prim(stage, robot_prim_path: str):
+    robot_prim = stage.GetPrimAtPath(robot_prim_path)
+    if not robot_prim.IsValid():
+        raise RuntimeError(f"Robot prim is not valid: {robot_prim_path}")
+
+    robot_root_prim_path = f"{robot_prim_path}/{ROBOT_PHYSICAL_ROOT_LINK_NAME}"
+    robot_root_prim = stage.GetPrimAtPath(robot_root_prim_path)
+    if not robot_root_prim.IsValid():
+        raise RuntimeError(
+            "Robot physical root prim is missing. Isaac Sim must expose "
+            f"{robot_root_prim_path}"
+        )
+    return robot_root_prim
+
+
 def add_robot_owned_camera(stage, robot_prim_path: str) -> str:
     from pxr import Gf, UsdGeom
 
-    robot_mount_prim = None
-    for mount_prim_name in ROBOT_CAMERA_MOUNT_PRIM_CANDIDATES:
-        mount_prim_path = f"{robot_prim_path}/{mount_prim_name}"
-        candidate_prim = stage.GetPrimAtPath(mount_prim_path)
-        if candidate_prim.IsValid():
-            robot_mount_prim = candidate_prim
-            break
-    if robot_mount_prim is None:
-        raise RuntimeError(
-            "Could not find a valid robot camera mount prim under "
-            f"{robot_prim_path}; checked {ROBOT_CAMERA_MOUNT_PRIM_CANDIDATES!r}"
-        )
+    robot_mount_prim = get_robot_physical_root_prim(stage, robot_prim_path)
 
     camera_link_path = (
         f"{robot_mount_prim.GetPath().pathString}/{VISION_CAMERA_LINK_PRIM_NAME}"
@@ -260,7 +283,12 @@ def add_robot_owned_camera(stage, robot_prim_path: str) -> str:
     return camera_path
 
 
-def configure_ros2_camera_bridge(stage, camera_prim_path: str, cart_prim_path: str) -> dict[str, str]:
+def configure_ros2_camera_bridge(
+    stage,
+    camera_prim_path: str,
+    cart_prim_path: str,
+    robot_prim_path: str,
+) -> dict[str, str]:
     import omni.graph.core as og
     import omni.replicator.core as rep
     import usdrt.Sdf
@@ -293,6 +321,7 @@ def configure_ros2_camera_bridge(stage, camera_prim_path: str, cart_prim_path: s
         raise RuntimeError(
             f"Camera mount parent prim is not valid for camera link: {camera_link_prim.GetPath()}"
         )
+    robot_root_prim = get_robot_physical_root_prim(stage, robot_prim_path)
 
     render_product = rep.create.render_product(
         camera_prim_path,
@@ -357,10 +386,22 @@ def configure_ros2_camera_bridge(stage, camera_prim_path: str, cart_prim_path: s
             og.Controller.Keys.CREATE_NODES: [
                 ("OnPlaybackTick", "omni.graph.action.OnPlaybackTick"),
                 ("ReadSimTime", "isaacsim.core.nodes.IsaacReadSimulationTime"),
+                ("PublishRobotRootTF", "isaacsim.ros2.bridge.ROS2PublishTransformTree"),
                 ("PublishCameraLinkTF", "isaacsim.ros2.bridge.ROS2PublishTransformTree"),
                 ("PublishCameraOpticalTF", "isaacsim.ros2.bridge.ROS2PublishTransformTree"),
             ],
             og.Controller.Keys.SET_VALUES: [
+                ("PublishRobotRootTF.inputs:topicName", "tf_static"),
+                ("PublishRobotRootTF.inputs:staticPublisher", True),
+                (
+                    "PublishRobotRootTF.inputs:targetPrims",
+                    [usdrt.Sdf.Path(robot_root_prim.GetPath().pathString)],
+                ),
+                (
+                    "PublishRobotRootTF.inputs:parentPrim",
+                    [usdrt.Sdf.Path(cart_prim_path)],
+                ),
+                ("PublishRobotRootTF.inputs:nodeNamespace", node_namespace),
                 ("PublishCameraLinkTF.inputs:topicName", "tf_static"),
                 ("PublishCameraLinkTF.inputs:staticPublisher", True),
                 (
@@ -385,8 +426,10 @@ def configure_ros2_camera_bridge(stage, camera_prim_path: str, cart_prim_path: s
                 ("PublishCameraOpticalTF.inputs:nodeNamespace", node_namespace),
             ],
             og.Controller.Keys.CONNECT: [
+                ("OnPlaybackTick.outputs:tick", "PublishRobotRootTF.inputs:execIn"),
                 ("OnPlaybackTick.outputs:tick", "PublishCameraLinkTF.inputs:execIn"),
                 ("OnPlaybackTick.outputs:tick", "PublishCameraOpticalTF.inputs:execIn"),
+                ("ReadSimTime.outputs:simulationTime", "PublishRobotRootTF.inputs:timeStamp"),
                 ("ReadSimTime.outputs:simulationTime", "PublishCameraLinkTF.inputs:timeStamp"),
                 ("ReadSimTime.outputs:simulationTime", "PublishCameraOpticalTF.inputs:timeStamp"),
             ],
@@ -407,6 +450,7 @@ def configure_ros2_camera_bridge(stage, camera_prim_path: str, cart_prim_path: s
     print(
         "[store_shelf] Configured Isaac Sim ROS 2 TF publishers "
         f"(dynamic_prims={cart_prim_path}; "
+        f"robot_root={robot_root_prim.GetPath().pathString}; "
         f"camera_mount_parent={camera_mount_parent_prim.GetPath().pathString}; "
         f"camera_link={camera_link_prim.GetPath().pathString}; "
         f"camera_optical={camera_prim.GetPath().pathString})",
@@ -418,6 +462,7 @@ def configure_ros2_camera_bridge(stage, camera_prim_path: str, cart_prim_path: s
         "camera_frame_id": camera_frame_id,
         "camera_prim_path": camera_prim_path,
         "render_product_path": render_product_path,
+        "robot_root_prim_path": robot_root_prim.GetPath().pathString,
         "camera_link_prim_path": camera_link_prim.GetPath().pathString,
         "cart_prim_path": cart_prim_path,
         "node_namespace": node_namespace,
@@ -426,56 +471,18 @@ def configure_ros2_camera_bridge(stage, camera_prim_path: str, cart_prim_path: s
 
 def find_articulation_root_prim_path(stage, robot_prim_path: str) -> str:
     import omni.kit.app
-    from pxr import Sdf, Usd, UsdPhysics
-
-    robot_prim = stage.GetPrimAtPath(robot_prim_path)
-    if not robot_prim.IsValid():
-        raise RuntimeError(f"Robot prim is not valid: {robot_prim_path}")
+    from pxr import UsdPhysics
 
     # Imported URDF contents may not be traversable until a frame has advanced.
     omni.kit.app.get_app().update()
 
-    articulation_paths = []
-    for prim in Usd.PrimRange(robot_prim):
-        if prim.HasAPI(UsdPhysics.ArticulationRootAPI):
-            articulation_paths.append(prim.GetPath().pathString)
+    articulation_root_prim = get_robot_physical_root_prim(stage, robot_prim_path)
+    articulation_root = articulation_root_prim.GetPath().pathString
+    if not articulation_root_prim.HasAPI(UsdPhysics.RigidBodyAPI):
+        raise RuntimeError(f"Robot physical root is not a rigid body: {articulation_root}")
+    if not articulation_root_prim.HasAPI(UsdPhysics.ArticulationRootAPI):
+        UsdPhysics.ArticulationRootAPI.Apply(articulation_root_prim)
 
-    if articulation_paths:
-        print(
-            "[store_shelf] Articulation root candidates: "
-            + ", ".join(sorted(articulation_paths)),
-            flush=True,
-        )
-
-    if not articulation_paths:
-        fallback = f"{robot_prim_path}/root_joint"
-        fallback_prim = stage.GetPrimAtPath(fallback)
-        if fallback_prim.IsValid():
-            print(
-                f"[store_shelf] Falling back to inferred articulation root {fallback}",
-                flush=True,
-            )
-            return fallback
-        raise RuntimeError(
-            f"Could not find articulation root under imported robot prim: {robot_prim_path}"
-        )
-
-    articulation_paths.sort(key=len)
-    articulation_root = articulation_paths[0]
-    articulation_root_path = Sdf.Path(articulation_root)
-    parent_path = articulation_root_path.GetParentPath()
-    if (
-        not parent_path.isEmpty
-        and articulation_root_path.name == parent_path.name
-        and stage.GetPrimAtPath(parent_path).IsValid()
-    ):
-        normalized = parent_path.pathString
-        print(
-            f"[store_shelf] Normalizing duplicated articulation root path "
-            f"{articulation_root} -> {normalized}",
-            flush=True,
-        )
-        articulation_root = normalized
     print(
         f"[store_shelf] Resolved articulation root for {robot_prim_path} -> {articulation_root}",
         flush=True,
@@ -653,23 +660,27 @@ def randomize_cart_x(cart_prim, base_translation: tuple[float, float, float]) ->
     return x_offset
 
 
-def randomize_robot_arm_joints(stage, robot_prim_path: str) -> dict[str, float]:
+def set_robot_arm_joints(
+    stage,
+    robot_prim_path: str,
+    joint_positions_rad: dict[str, float],
+    *,
+    label: str,
+) -> dict[str, float]:
     import math
     from pxr import PhysxSchema, Usd, UsdPhysics
 
-    sampled_positions = {}
+    applied_positions = {}
     robot_prim = stage.GetPrimAtPath(robot_prim_path)
     if not robot_prim.IsValid():
-        return sampled_positions
+        return applied_positions
 
     for prim in Usd.PrimRange(robot_prim):
         joint_name = prim.GetName()
-        limits = YUMI_ARM_JOINT_LIMITS_RAD.get(joint_name)
-        if limits is None:
+        joint_position_rad = joint_positions_rad.get(joint_name)
+        if joint_position_rad is None:
             continue
 
-        lower, upper = limits
-        joint_position_rad = random.uniform(lower, upper)
         joint_position_deg = math.degrees(joint_position_rad)
         UsdPhysics.DriveAPI.Apply(prim, "angular").CreateTargetPositionAttr().Set(
             joint_position_deg
@@ -678,17 +689,39 @@ def randomize_robot_arm_joints(stage, robot_prim_path: str) -> dict[str, float]:
             joint_position_deg
         )
         PhysxSchema.JointStateAPI.Apply(prim, "angular").CreateVelocityAttr().Set(0.0)
-        sampled_positions[joint_name] = joint_position_rad
+        applied_positions[joint_name] = joint_position_rad
 
     print(
-        "[store_shelf] Randomized robot arm joints: "
+        f"[store_shelf] {label}: "
         + ", ".join(
             f"{joint_name}={joint_position:.3f}rad"
-            for joint_name, joint_position in sorted(sampled_positions.items())
+            for joint_name, joint_position in sorted(applied_positions.items())
         ),
         flush=True,
     )
-    return sampled_positions
+    return applied_positions
+
+
+def randomize_robot_arm_joints(stage, robot_prim_path: str) -> dict[str, float]:
+    sampled_positions = {
+        joint_name: random.uniform(lower, upper)
+        for joint_name, (lower, upper) in YUMI_ARM_JOINT_LIMITS_RAD.items()
+    }
+    return set_robot_arm_joints(
+        stage,
+        robot_prim_path,
+        sampled_positions,
+        label="Randomized robot arm joints",
+    )
+
+
+def set_robot_arm_joints_for_planning(stage, robot_prim_path: str) -> dict[str, float]:
+    return set_robot_arm_joints(
+        stage,
+        robot_prim_path,
+        YUMI_STORE_DEMO_READY_JOINT_POSITIONS_RAD,
+        label="Set robot arm joints to store_demo_ready pose",
+    )
 
 
 def set_semantic_label(prim, label: str) -> None:
@@ -760,6 +793,7 @@ def construct_scene(configuration: str) -> dict:
             stage,
             camera_prim_path=camera_prim_path,
             cart_prim_path=cart_prim.GetPath().pathString,
+            robot_prim_path=robot_prim_path,
         )
     cart_base_translation = prim_local_translation(cart_prim)
 

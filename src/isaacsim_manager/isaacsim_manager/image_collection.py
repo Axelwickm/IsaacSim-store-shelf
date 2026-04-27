@@ -17,9 +17,18 @@ from .scene_construction import (
     find_prim_named,
     randomize_item_position_pools,
     randomize_robot_arm_joints,
+    set_robot_arm_joints_for_planning,
     set_prim_local_translation,
 )
 from .vision_panel import DEFAULT_DEBUG_IMAGE_TOPIC, IsaacSimVisionPanel
+from .target_marker_visualizer import (
+    DEFAULT_CLEAR_LATCHED_TARGET_TOPIC,
+    DEFAULT_DEBUG_DRAW_CROSSHAIR_SIZE_METERS,
+    DEFAULT_DEBUG_DRAW_RADIUS_PIXELS,
+    DEFAULT_LATCHED_TARGET_POINT_TOPIC,
+    DEFAULT_MARKER_RADIUS_METERS,
+    IsaacSimTargetMarkerVisualizer,
+)
 
 
 DEFAULT_REPLICATOR_OUTPUT_DIR = "/workspace/collect_vision_data_output"
@@ -29,12 +38,14 @@ DEFAULT_CAPTURE_WARMUP_SECONDS = 1.0
 DEFAULT_CART_LEFT_OFFSET_METERS = 0.0
 DEFAULT_CART_RIGHT_OFFSET_METERS = 2.0
 DEFAULT_CART_SLIDE_SPEED_METERS_PER_SECOND = 0.25
-DEFAULT_CART_RESTART_WAIT_SECONDS = 1.0
+DEFAULT_STORE_DEMO_CART_MOTION_ENABLED = False
+DEFAULT_STORE_DEMO_RESET_INTERVAL_SECONDS = 60.0
 SIMULATION_STEP_SECONDS = 1.0 / 60.0
 
 _replicator_capture_enabled = False
 _timeline_autoplay_enabled = False
 _vision_panel = None
+_target_marker_visualizer = None
 _flow_state = None
 
 
@@ -226,7 +237,7 @@ def _prepare_collection_capture_pose(flow_state: dict) -> None:
 
 def _reset_store_demo_flow(flow_state: dict) -> None:
     _randomize_items(flow_state["item_position_pools"])
-    randomize_robot_arm_joints(flow_state["stage"], flow_state["robot_prim_path"])
+    set_robot_arm_joints_for_planning(flow_state["stage"], flow_state["robot_prim_path"])
     flow_state["cart_x_offset"] = flow_state["cart_left_offset"]
     _set_cart_x_offset(
         flow_state["cart_prim"],
@@ -279,32 +290,32 @@ def _update_store_demo_flow(flow_state: dict) -> None:
     if _timeline_autoplay_enabled and not _timeline_is_playing():
         return
 
-    if flow_state["restart_wait_remaining"] > 0.0:
-        flow_state["restart_wait_remaining"] -= SIMULATION_STEP_SECONDS
-        if flow_state["restart_wait_remaining"] > 0.0:
-            return
-        _reset_store_demo_flow(flow_state)
-        return
+    if flow_state["cart_motion_enabled"]:
+        x_offset = min(
+            flow_state["cart_x_offset"]
+            + flow_state["cart_slide_speed"] * SIMULATION_STEP_SECONDS,
+            flow_state["cart_right_offset"],
+        )
+        flow_state["cart_x_offset"] = x_offset
+        _set_cart_x_offset(
+            flow_state["cart_prim"],
+            flow_state["cart_base_translation"],
+            x_offset,
+        )
 
-    x_offset = min(
-        flow_state["cart_x_offset"]
-        + flow_state["cart_slide_speed"] * SIMULATION_STEP_SECONDS,
-        flow_state["cart_right_offset"],
-    )
-    flow_state["cart_x_offset"] = x_offset
-    _set_cart_x_offset(
-        flow_state["cart_prim"],
-        flow_state["cart_base_translation"],
-        x_offset,
-    )
-    if x_offset >= flow_state["cart_right_offset"]:
-        flow_state["restart_wait_remaining"] = flow_state["cart_restart_wait_seconds"]
+    flow_state["reset_time_remaining"] -= SIMULATION_STEP_SECONDS
+    if flow_state["reset_time_remaining"] > 0.0:
+        return
+    _reset_store_demo_flow(flow_state)
+    flow_state["reset_time_remaining"] = flow_state["reset_interval_seconds"]
 
 
 def update_simulation_app(simulation_app) -> None:
     simulation_app.update()
     if _vision_panel is not None:
         _vision_panel.update()
+    if _target_marker_visualizer is not None:
+        _target_marker_visualizer.update()
     if _flow_state is None:
         return
     if _flow_state["mode"] == "collect":
@@ -321,6 +332,7 @@ def _setup_store_shelf_scene(
     global _replicator_capture_enabled
     global _timeline_autoplay_enabled
     global _vision_panel
+    global _target_marker_visualizer
     global _flow_state
 
     _replicator_capture_enabled = False
@@ -329,6 +341,9 @@ def _setup_store_shelf_scene(
     if _vision_panel is not None:
         _vision_panel.close()
         _vision_panel = None
+    if _target_marker_visualizer is not None:
+        _target_marker_visualizer.close()
+        _target_marker_visualizer = None
 
     scene = construct_scene(configuration)
     _timeline_autoplay_enabled = (
@@ -374,10 +389,17 @@ def _setup_store_shelf_scene(
             str(DEFAULT_CART_SLIDE_SPEED_METERS_PER_SECOND),
         ).strip()
     )
-    cart_restart_wait_seconds = float(
+    store_demo_cart_motion_enabled = (
         os.environ.get(
-            "ISAACSIM_CART_RESTART_WAIT_SECONDS",
-            str(DEFAULT_CART_RESTART_WAIT_SECONDS),
+            "ISAACSIM_STORE_DEMO_CART_MOTION_ENABLED",
+            str(DEFAULT_STORE_DEMO_CART_MOTION_ENABLED).lower(),
+        ).strip().lower()
+        in {"1", "true", "yes", "on"}
+    )
+    store_demo_reset_interval_seconds = float(
+        os.environ.get(
+            "ISAACSIM_STORE_DEMO_RESET_INTERVAL_SECONDS",
+            str(DEFAULT_STORE_DEMO_RESET_INTERVAL_SECONDS),
         ).strip()
     )
 
@@ -420,14 +442,18 @@ def _setup_store_shelf_scene(
             "cart_left_offset": cart_left_offset,
             "cart_right_offset": cart_right_offset,
             "cart_slide_speed": cart_slide_speed,
-            "cart_restart_wait_seconds": cart_restart_wait_seconds,
-            "restart_wait_remaining": 0.0,
+            "cart_motion_enabled": store_demo_cart_motion_enabled,
+            "reset_interval_seconds": store_demo_reset_interval_seconds,
+            "reset_time_remaining": store_demo_reset_interval_seconds,
         }
         _reset_store_demo_flow(_flow_state)
         print(
-            "[store_shelf] Store demo cart slide enabled "
-            f"left_offset={cart_left_offset:.3f}m right_offset={cart_right_offset:.3f}m "
-            f"speed={cart_slide_speed:.3f}m/s restart_wait={cart_restart_wait_seconds:.3f}s",
+            "[store_shelf] Store demo timed reset enabled "
+            f"cart_offset={cart_left_offset:.3f}m "
+            f"cart_motion_enabled={store_demo_cart_motion_enabled} "
+            f"cart_right_offset={cart_right_offset:.3f}m "
+            f"cart_slide_speed={cart_slide_speed:.3f}m/s "
+            f"reset_interval={store_demo_reset_interval_seconds:.3f}s",
             flush=True,
         )
     else:
@@ -480,6 +506,57 @@ def _setup_store_shelf_scene(
         _vision_panel = IsaacSimVisionPanel(topic_name=debug_image_topic)
         print(
             f"[store_shelf] Opened Isaac Sim vision panel for {debug_image_topic}",
+            flush=True,
+        )
+    if (
+        configuration == "store_demo"
+        and os.environ.get("ISAACSIM_TARGET_MARKERS_ENABLED", "true").strip().lower()
+        not in {"0", "false", "no", "off"}
+    ):
+        target_topic = os.environ.get(
+            "ISAACSIM_LATCHED_TARGET_POINT_TOPIC",
+            DEFAULT_LATCHED_TARGET_POINT_TOPIC,
+        ).strip()
+        clear_topic = os.environ.get(
+            "ISAACSIM_CLEAR_LATCHED_TARGET_TOPIC",
+            DEFAULT_CLEAR_LATCHED_TARGET_TOPIC,
+        ).strip()
+        marker_radius = float(
+            os.environ.get(
+                "ISAACSIM_TARGET_MARKER_RADIUS",
+                str(DEFAULT_MARKER_RADIUS_METERS),
+            ).strip()
+        )
+        debug_draw_radius = float(
+            os.environ.get(
+                "ISAACSIM_TARGET_MARKER_DEBUG_DRAW_RADIUS",
+                str(DEFAULT_DEBUG_DRAW_RADIUS_PIXELS),
+            ).strip()
+        )
+        debug_draw_crosshair_size = float(
+            os.environ.get(
+                "ISAACSIM_TARGET_MARKER_CROSSHAIR_SIZE",
+                str(DEFAULT_DEBUG_DRAW_CROSSHAIR_SIZE_METERS),
+            ).strip()
+        )
+        max_markers = int(
+            os.environ.get("ISAACSIM_MAX_TARGET_MARKERS", "20").strip()
+        )
+        if not rclpy.ok():
+            rclpy.init(args=None)
+        _target_marker_visualizer = IsaacSimTargetMarkerVisualizer(
+            target_topic_name=target_topic,
+            clear_topic_name=clear_topic,
+            marker_radius_meters=marker_radius,
+            debug_draw_radius_pixels=debug_draw_radius,
+            debug_draw_crosshair_size_meters=debug_draw_crosshair_size,
+            max_markers=max_markers,
+        )
+        print(
+            "[store_shelf] Enabled Isaac Sim latched target markers "
+            f"target_topic={target_topic} clear_topic={clear_topic} "
+            f"radius={marker_radius:.3f}m debug_draw_radius={debug_draw_radius:.1f}px "
+            f"crosshair={debug_draw_crosshair_size:.3f}m max_markers={max_markers}",
             flush=True,
         )
 

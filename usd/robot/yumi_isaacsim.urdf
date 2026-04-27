@@ -483,6 +483,12 @@
       <material name="Light_Grey" />
     </collision>
   </link>
+  <joint name="gripper_r_base_to_grasp_frame" type="fixed">
+    <parent link="gripper_r_base" />
+    <child link="gripper_r_grasp_frame" />
+    <origin rpy="0 0 0" xyz="0 0 0.11" />
+  </joint>
+  <link name="gripper_r_grasp_frame" />
   <joint name="gripper_r_joint" type="prismatic">
     <parent link="gripper_r_base" />
     <child link="gripper_r_finger_r" />
@@ -568,6 +574,12 @@
       <material name="Light_Grey" />
     </collision>
   </link>
+  <joint name="gripper_l_base_to_grasp_frame" type="fixed">
+    <parent link="gripper_l_base" />
+    <child link="gripper_l_grasp_frame" />
+    <origin rpy="0 0 0" xyz="0 0 0.11" />
+  </joint>
+  <link name="gripper_l_grasp_frame" />
   <joint name="gripper_l_joint" type="prismatic">
     <parent link="gripper_l_base" />
     <child link="gripper_l_finger_r" />

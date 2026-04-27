@@ -93,7 +93,6 @@ def export_urdf(output_path: Path) -> Path:
     _strip_tag(root, "gazebo")
     _strip_tag(root, "transmission")
     _strip_named_link(root, "world")
-    _strip_named_link(root, "yumi_base_link", replacement_child="yumi_body")
     _rewrite_mesh_paths(root, package_share)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)

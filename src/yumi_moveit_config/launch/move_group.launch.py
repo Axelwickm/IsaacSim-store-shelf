@@ -20,6 +20,7 @@ def load_yaml(package_name: str, relative_path: str):
 def generate_launch_description() -> LaunchDescription:
     planning_pipeline = LaunchConfiguration("planning_pipeline")
     use_rviz = LaunchConfiguration("use_rviz")
+    use_sim_time = LaunchConfiguration("use_sim_time")
 
     moveit_config = (
         MoveItConfigsBuilder("yumi", package_name="yumi_moveit_config")
@@ -53,6 +54,13 @@ def generate_launch_description() -> LaunchDescription:
     moveit_controllers = load_yaml(
         "yumi_moveit_config", "config/moveit_controllers.yaml"
     )
+    planning_scene_monitor_parameters = {
+        "publish_planning_scene": False,
+        "publish_geometry_updates": False,
+        "publish_state_updates": False,
+        "publish_transforms_updates": False,
+        "monitor_dynamics": False,
+    }
 
     move_group_node = Node(
         package="moveit_ros_move_group",
@@ -63,7 +71,8 @@ def generate_launch_description() -> LaunchDescription:
             {"default_planning_pipeline": planning_pipeline},
             trajectory_execution,
             moveit_controllers,
-            {"use_sim_time": False},
+            planning_scene_monitor_parameters,
+            {"use_sim_time": use_sim_time},
         ],
     )
 
@@ -71,7 +80,7 @@ def generate_launch_description() -> LaunchDescription:
         package="robot_state_publisher",
         executable="robot_state_publisher",
         output="screen",
-        parameters=[moveit_config.robot_description],
+        parameters=[moveit_config.robot_description, {"use_sim_time": use_sim_time}],
     )
 
     rviz_node = Node(
@@ -97,6 +106,11 @@ def generate_launch_description() -> LaunchDescription:
             "use_rviz",
             default_value="false",
             description="Whether to launch RViz alongside move_group.",
+        ),
+        DeclareLaunchArgument(
+            "use_sim_time",
+            default_value="true",
+            description="Use Isaac Sim /clock for MoveIt state freshness checks.",
         ),
         robot_state_publisher_node,
         move_group_node,

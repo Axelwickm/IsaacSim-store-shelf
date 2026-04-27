@@ -10,6 +10,7 @@ from ament_index_python.packages import get_package_share_directory
 def generate_launch_description() -> LaunchDescription:
     sim_launch = Path(get_package_share_directory("controller")) / "launch" / "sim.launch.py"
     vision_launch = Path(get_package_share_directory("vision")) / "launch" / "inference.launch.py"
+    motion_launch = Path(get_package_share_directory("motion")) / "launch" / "motion.launch.py"
 
     return LaunchDescription(
         [
@@ -33,12 +34,22 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="true",
                 description="Whether to enable CUDA mixed precision for vision inference.",
             ),
+            DeclareLaunchArgument(
+                "motion_pipeline_id",
+                default_value="isaac_ros_cumotion",
+                description="MoveIt planning pipeline requested by the motion planner.",
+            ),
+            DeclareLaunchArgument(
+                "motion_planner_id",
+                default_value="cuMotion",
+                description="Planner id requested by the motion planner.",
+            ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(str(sim_launch)),
                 launch_arguments={
                     "configuration": "store_demo",
                     "use_moveit": "true",
-                    "planning_pipeline": "ompl",
+                    "planning_pipeline": LaunchConfiguration("motion_pipeline_id"),
                 }.items(),
             ),
             IncludeLaunchDescription(
@@ -51,6 +62,13 @@ def generate_launch_description() -> LaunchDescription:
                     "use_mixed_precision": LaunchConfiguration(
                         "vision_use_mixed_precision"
                     ),
+                }.items(),
+            ),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(str(motion_launch)),
+                launch_arguments={
+                    "pipeline_id": LaunchConfiguration("motion_pipeline_id"),
+                    "planner_id": LaunchConfiguration("motion_planner_id"),
                 }.items(),
             ),
         ]

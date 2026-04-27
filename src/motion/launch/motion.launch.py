@@ -9,6 +9,7 @@ def generate_launch_description() -> LaunchDescription:
     pipeline_id = LaunchConfiguration("pipeline_id")
     planner_id = LaunchConfiguration("planner_id")
     target_pose_topic = LaunchConfiguration("target_pose_topic")
+    plan_only = LaunchConfiguration("plan_only")
 
     return LaunchDescription(
         [
@@ -32,6 +33,11 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="/motion/target_pose",
                 description="PoseStamped topic to consume motion targets from.",
             ),
+            DeclareLaunchArgument(
+                "plan_only",
+                default_value="false",
+                description="Whether MoveIt requests should plan only without execution.",
+            ),
             Node(
                 package="motion",
                 executable="planner",
@@ -43,8 +49,15 @@ def generate_launch_description() -> LaunchDescription:
                         "pipeline_id": pipeline_id,
                         "planner_id": planner_id,
                         "target_pose_topic": target_pose_topic,
+                        "plan_only": plan_only,
                     }
                 ],
+            ),
+            Node(
+                package="motion",
+                executable="trajectory_controller",
+                name="right_arm_trajectory_controller",
+                output="screen",
             ),
         ]
     )

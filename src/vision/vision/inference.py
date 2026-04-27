@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 
 import time
+import random
+import math
 from pathlib import Path
 
 import cv2
+from geometry_msgs.msg import PointStamped, PoseStamped
 import numpy as np
 import rclpy
 import torch
 from rclpy.node import Node
-from sensor_msgs.msg import Image
+from sensor_msgs.msg import CameraInfo, Image
+import tf2_geometry_msgs
+import tf2_ros
 
 from vision.checkpoints import load_checkpoint
 from vision.dataset import DEFAULT_IMAGE_SIZE, RGB_MEAN, RGB_STD
@@ -22,6 +27,14 @@ DEFAULT_IDENTITY_TOPIC = "/vision/predicted_identity"
 DEFAULT_DEPTH_TOPIC = "/vision/predicted_depth"
 DEFAULT_DEPTH_VIZ_TOPIC = "/vision/predicted_depth_viz"
 DEFAULT_OCCUPANCY_TOPIC = "/vision/predicted_occupancy"
+DEFAULT_CAMERA_INFO_TOPIC = "/camera/camera_info"
+DEFAULT_SELECTED_ITEM_POINT_TOPIC = "/vision/selected_item_point"
+DEFAULT_SELECTED_ITEM_MOVEIT_POINT_TOPIC = "/vision/selected_item_moveit_point"
+DEFAULT_SELECTED_ITEM_POSE_TOPIC = "/vision/selected_item_pose"
+DEFAULT_TARGET_FRAME_ID = "world"
+DEFAULT_MOVEIT_TARGET_FRAME_ID = "yumi_body"
+DEFAULT_QUERY_ALPHA_THRESHOLD = 0.2
+DEFAULT_QUERY_RENDER_ALPHA_THRESHOLD = 0.2
 DEFAULT_LOG_EVERY = 30
 DEPTH_DISPLAY_MAX_METERS = 2.0
 
@@ -115,6 +128,20 @@ class VisionInferenceNode(Node):
         self.declare_parameter("depth_topic", DEFAULT_DEPTH_TOPIC)
         self.declare_parameter("depth_viz_topic", DEFAULT_DEPTH_VIZ_TOPIC)
         self.declare_parameter("occupancy_topic", DEFAULT_OCCUPANCY_TOPIC)
+        self.declare_parameter("camera_info_topic", DEFAULT_CAMERA_INFO_TOPIC)
+        self.declare_parameter("selected_item_point_topic", DEFAULT_SELECTED_ITEM_POINT_TOPIC)
+        self.declare_parameter(
+            "selected_item_moveit_point_topic",
+            DEFAULT_SELECTED_ITEM_MOVEIT_POINT_TOPIC,
+        )
+        self.declare_parameter("selected_item_pose_topic", DEFAULT_SELECTED_ITEM_POSE_TOPIC)
+        self.declare_parameter("target_frame_id", DEFAULT_TARGET_FRAME_ID)
+        self.declare_parameter("moveit_target_frame_id", DEFAULT_MOVEIT_TARGET_FRAME_ID)
+        self.declare_parameter("query_alpha_threshold", DEFAULT_QUERY_ALPHA_THRESHOLD)
+        self.declare_parameter(
+            "query_render_alpha_threshold",
+            DEFAULT_QUERY_RENDER_ALPHA_THRESHOLD,
+        )
         self.declare_parameter("image_size", DEFAULT_IMAGE_SIZE)
         self.declare_parameter("use_mixed_precision", True)
         self.declare_parameter("log_every", DEFAULT_LOG_EVERY)
@@ -127,9 +154,30 @@ class VisionInferenceNode(Node):
         depth_topic = str(self.get_parameter("depth_topic").value)
         depth_viz_topic = str(self.get_parameter("depth_viz_topic").value)
         occupancy_topic = str(self.get_parameter("occupancy_topic").value)
+        camera_info_topic = str(self.get_parameter("camera_info_topic").value)
+        selected_item_point_topic = str(
+            self.get_parameter("selected_item_point_topic").value
+        )
+        selected_item_moveit_point_topic = str(
+            self.get_parameter("selected_item_moveit_point_topic").value
+        )
+        selected_item_pose_topic = str(
+            self.get_parameter("selected_item_pose_topic").value
+        )
+        self._target_frame_id = str(self.get_parameter("target_frame_id").value)
+        self._moveit_target_frame_id = str(
+            self.get_parameter("moveit_target_frame_id").value
+        )
+        self._query_alpha_threshold = float(
+            self.get_parameter("query_alpha_threshold").value
+        )
+        self._query_render_alpha_threshold = float(
+            self.get_parameter("query_render_alpha_threshold").value
+        )
         self._image_size = int(self.get_parameter("image_size").value)
         self._use_mixed_precision = bool(self.get_parameter("use_mixed_precision").value)
         self._log_every = max(int(self.get_parameter("log_every").value), 1)
+        self._camera_info: CameraInfo | None = None
 
         latest_checkpoint_path = checkpoint_dir / "latest.pt"
         checkpoint_path = (
@@ -161,6 +209,29 @@ class VisionInferenceNode(Node):
         self._depth_publisher = self.create_publisher(Image, depth_topic, 10)
         self._depth_viz_publisher = self.create_publisher(Image, depth_viz_topic, 10)
         self._occupancy_publisher = self.create_publisher(Image, occupancy_topic, 10)
+        self._selected_item_pose_publisher = self.create_publisher(
+            PoseStamped,
+            selected_item_pose_topic,
+            10,
+        )
+        self._selected_item_point_publisher = self.create_publisher(
+            PointStamped,
+            selected_item_point_topic,
+            10,
+        )
+        self._selected_item_moveit_point_publisher = self.create_publisher(
+            PointStamped,
+            selected_item_moveit_point_topic,
+            10,
+        )
+        self._tf_buffer = tf2_ros.Buffer()
+        self._tf_listener = tf2_ros.TransformListener(self._tf_buffer, self)
+        self._camera_info_subscription = self.create_subscription(
+            CameraInfo,
+            camera_info_topic,
+            self._handle_camera_info,
+            10,
+        )
         self._image_subscription = self.create_subscription(
             Image,
             image_topic,
@@ -184,6 +255,283 @@ class VisionInferenceNode(Node):
             f"{debug_image_topic}, {identity_topic}, {depth_topic}, "
             f"{depth_viz_topic}, and {occupancy_topic}"
         )
+        self.get_logger().info(
+            "Publishing selected item point "
+            f"on {selected_item_point_topic} in frame {self._target_frame_id}; "
+            f"MoveIt point on {selected_item_moveit_point_topic} "
+            f"in frame {self._moveit_target_frame_id}; "
+            f"legacy pose mirror on {selected_item_pose_topic}"
+        )
+
+    def _handle_camera_info(self, message: CameraInfo) -> None:
+        self._camera_info = message
+
+    def _publish_selected_item_pose(
+        self,
+        outputs: dict,
+        image_header,
+        source_width: int,
+        source_height: int,
+    ) -> None:
+        if self._camera_info is None:
+            if self._frame_count == 0 or self._frame_count % self._log_every == 0:
+                self.get_logger().warning(
+                    "Skipping selected item pose: no CameraInfo received yet"
+                )
+            return
+
+        patch_alpha = outputs["patch_alpha"][0].detach().float()
+        centers = outputs["centers"][0].detach().float()
+        sizes = outputs["sizes"][0].detach().float()
+        predicted_depth = outputs["predicted_depth"][0].detach().float()
+        while predicted_depth.ndim > 2:
+            predicted_depth = predicted_depth.squeeze(0)
+        patch_alpha_cpu = patch_alpha.cpu()
+        alpha_scores = patch_alpha_cpu.mean(dim=(1, 2))
+        valid_query_indices = torch.nonzero(
+            alpha_scores > self._query_alpha_threshold,
+            as_tuple=False,
+        ).flatten()
+        if valid_query_indices.numel() == 0:
+            if self._frame_count == 0 or self._frame_count % self._log_every == 0:
+                self.get_logger().warning(
+                    "Skipping selected item pose: no query exceeded "
+                    f"query_alpha_threshold={self._query_alpha_threshold:.3f}"
+                )
+            return
+
+        query_index = int(random.choice(valid_query_indices.tolist()))
+        query_alpha_score = float(alpha_scores[query_index].item())
+        query_alpha = self._render_query_alpha_mask(
+            patch_alpha[query_index],
+            centers[query_index],
+            sizes[query_index],
+        )
+        mask = query_alpha > self._query_render_alpha_threshold
+        if not torch.any(mask):
+            if self._frame_count == 0 or self._frame_count % self._log_every == 0:
+                self.get_logger().warning(
+                    f"Skipping selected item pose: query {query_index} rendered mask is empty"
+                )
+            return
+
+        ys, xs = torch.nonzero(mask, as_tuple=True)
+        weights = query_alpha[ys, xs]
+        model_u = float((xs.float() * weights).sum().item() / weights.sum().item())
+        model_v = float((ys.float() * weights).sum().item() / weights.sum().item())
+        range_m = float(predicted_depth[ys, xs].mean().item())
+        if range_m <= 0.0:
+            if self._frame_count == 0 or self._frame_count % self._log_every == 0:
+                self.get_logger().warning(
+                    f"Skipping selected item pose: query {query_index} range={range_m:.3f}"
+                )
+            return
+
+        scale_x = float(source_width) / float(self._image_size)
+        scale_y = float(source_height) / float(self._image_size)
+        u = model_u * scale_x
+        v = model_v * scale_y
+
+        fx = float(self._camera_info.k[0])
+        fy = float(self._camera_info.k[4])
+        cx = float(self._camera_info.k[2])
+        cy = float(self._camera_info.k[5])
+        if fx == 0.0 or fy == 0.0:
+            if self._frame_count == 0 or self._frame_count % self._log_every == 0:
+                self.get_logger().warning("Skipping selected item pose: invalid CameraInfo K")
+            return
+
+        x_normalized = (u - cx) / fx
+        y_normalized = (v - cy) / fy
+        depth_m = range_m / math.sqrt(
+            x_normalized * x_normalized + y_normalized * y_normalized + 1.0
+        )
+
+        camera_pose = PoseStamped()
+        # In fixed-scene store demo mode TF can lag image stamps slightly; latest
+        # TF avoids future extrapolation while cart motion is disabled.
+        camera_pose.header.stamp = rclpy.time.Time().to_msg()
+        camera_pose.header.frame_id = self._camera_info.header.frame_id or image_header.frame_id
+        camera_pose.pose.position.x = x_normalized * depth_m
+        camera_pose.pose.position.y = y_normalized * depth_m
+        camera_pose.pose.position.z = depth_m
+        camera_pose.pose.orientation.w = 1.0
+
+        try:
+            world_pose = self._tf_buffer.transform(
+                camera_pose,
+                self._target_frame_id,
+                timeout=rclpy.duration.Duration(seconds=0.05),
+            )
+        except Exception as error:
+            if self._frame_count == 0 or self._frame_count % self._log_every == 0:
+                self.get_logger().warning(
+                    "Could not transform selected item pose "
+                    f"from {camera_pose.header.frame_id} to {self._target_frame_id}: {error}"
+                )
+            return
+
+        try:
+            camera_roundtrip_pose = self._tf_buffer.transform(
+                world_pose,
+                camera_pose.header.frame_id,
+                timeout=rclpy.duration.Duration(seconds=0.05),
+            )
+            if camera_roundtrip_pose.pose.position.z != 0.0:
+                roundtrip_u = (
+                    fx
+                    * camera_roundtrip_pose.pose.position.x
+                    / camera_roundtrip_pose.pose.position.z
+                    + cx
+                )
+                roundtrip_v = (
+                    fy
+                    * camera_roundtrip_pose.pose.position.y
+                    / camera_roundtrip_pose.pose.position.z
+                    + cy
+                )
+            else:
+                roundtrip_u = float("nan")
+                roundtrip_v = float("nan")
+        except Exception:
+            camera_roundtrip_pose = None
+            roundtrip_u = float("nan")
+            roundtrip_v = float("nan")
+
+        camera_origin_world = None
+        target_from_camera_world = None
+        optical_forward_dot = float("nan")
+        try:
+            camera_origin_pose = PoseStamped()
+            camera_origin_pose.header = camera_pose.header
+            camera_origin_pose.pose.orientation.w = 1.0
+            camera_origin_world = self._tf_buffer.transform(
+                camera_origin_pose,
+                self._target_frame_id,
+                timeout=rclpy.duration.Duration(seconds=0.05),
+            )
+
+            camera_forward_pose = PoseStamped()
+            camera_forward_pose.header = camera_pose.header
+            camera_forward_pose.pose.position.z = 1.0
+            camera_forward_pose.pose.orientation.w = 1.0
+            camera_forward_world = self._tf_buffer.transform(
+                camera_forward_pose,
+                self._target_frame_id,
+                timeout=rclpy.duration.Duration(seconds=0.05),
+            )
+
+            forward_x = (
+                camera_forward_world.pose.position.x
+                - camera_origin_world.pose.position.x
+            )
+            forward_y = (
+                camera_forward_world.pose.position.y
+                - camera_origin_world.pose.position.y
+            )
+            forward_z = (
+                camera_forward_world.pose.position.z
+                - camera_origin_world.pose.position.z
+            )
+            target_from_camera_world = (
+                world_pose.pose.position.x - camera_origin_world.pose.position.x,
+                world_pose.pose.position.y - camera_origin_world.pose.position.y,
+                world_pose.pose.position.z - camera_origin_world.pose.position.z,
+            )
+            optical_forward_dot = (
+                target_from_camera_world[0] * forward_x
+                + target_from_camera_world[1] * forward_y
+                + target_from_camera_world[2] * forward_z
+            )
+        except Exception:
+            pass
+
+        world_point = PointStamped()
+        world_point.header = world_pose.header
+        world_point.point = world_pose.pose.position
+        self._selected_item_point_publisher.publish(world_point)
+        self._selected_item_pose_publisher.publish(world_pose)
+
+        moveit_point = None
+        try:
+            moveit_point = PointStamped()
+            moveit_point.header = world_point.header
+            moveit_point.point = world_point.point
+            moveit_point = self._tf_buffer.transform(
+                moveit_point,
+                self._moveit_target_frame_id,
+                timeout=rclpy.duration.Duration(seconds=0.05),
+            )
+            self._selected_item_moveit_point_publisher.publish(moveit_point)
+        except Exception as error:
+            if self._frame_count == 0 or self._frame_count % self._log_every == 0:
+                self.get_logger().warning(
+                    "Could not transform selected item point "
+                    f"from {world_point.header.frame_id} to {self._moveit_target_frame_id}: {error}"
+                )
+
+        if self._frame_count == 0 or self._frame_count % self._log_every == 0:
+            self.get_logger().info(
+                f"Published selected item query={query_index} "
+                f"mean_alpha={query_alpha_score:.3f} pixel=({u:.1f},{v:.1f}) "
+                f"range={range_m:.3f}m z_depth={depth_m:.3f}m "
+                f"camera_xyz=({camera_pose.pose.position.x:.3f}, "
+                f"{camera_pose.pose.position.y:.3f}, "
+                f"{camera_pose.pose.position.z:.3f}) "
+                f"world_xyz=({world_point.point.x:.3f}, "
+                f"{world_point.point.y:.3f}, "
+                f"{world_point.point.z:.3f}) "
+                f"roundtrip_pixel=({roundtrip_u:.1f},{roundtrip_v:.1f}) "
+                f"camera_world={self._format_pose_position(camera_origin_world)} "
+                f"target_minus_camera_world={self._format_vec3(target_from_camera_world)} "
+                f"optical_forward_dot={optical_forward_dot:.3f} "
+                f"moveit_xyz={self._format_point(moveit_point)}"
+            )
+
+    def _format_pose_position(self, pose: PoseStamped | None) -> str:
+        if pose is None:
+            return "(nan,nan,nan)"
+        return (
+            f"({pose.pose.position.x:.3f},"
+            f"{pose.pose.position.y:.3f},"
+            f"{pose.pose.position.z:.3f})"
+        )
+
+    def _format_vec3(self, value: tuple[float, float, float] | None) -> str:
+        if value is None:
+            return "(nan,nan,nan)"
+        return f"({value[0]:.3f},{value[1]:.3f},{value[2]:.3f})"
+
+    def _format_point(self, point: PointStamped | None) -> str:
+        if point is None:
+            return "(nan,nan,nan)"
+        return f"({point.point.x:.3f},{point.point.y:.3f},{point.point.z:.3f})"
+
+    def _render_query_alpha_mask(
+        self,
+        patch_alpha: torch.Tensor,
+        center: torch.Tensor,
+        size: torch.Tensor,
+    ) -> torch.Tensor:
+        device = patch_alpha.device
+        ys = torch.linspace(-1.0, 1.0, self._image_size, device=device)
+        xs = torch.linspace(-1.0, 1.0, self._image_size, device=device)
+        grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+        local_x = ((grid_x - center[0]) / size[0]).clamp(-1.1, 1.1)
+        local_y = ((grid_y - center[1]) / size[1]).clamp(-1.1, 1.1)
+        sample_grid = torch.stack([local_x, local_y], dim=-1).view(
+            1,
+            self._image_size,
+            self._image_size,
+            2,
+        )
+        return torch.nn.functional.grid_sample(
+            patch_alpha.view(1, 1, patch_alpha.shape[0], patch_alpha.shape[1]),
+            sample_grid,
+            mode="bilinear",
+            padding_mode="zeros",
+            align_corners=True,
+        ).view(self._image_size, self._image_size)
 
     def _handle_image(self, message: Image) -> None:
         try:
@@ -244,6 +592,12 @@ class VisionInferenceNode(Node):
         )
         self._occupancy_publisher.publish(
             _rgb_array_to_image_message(occupancy_rgb, header=header, encoding="rgb8")
+        )
+        self._publish_selected_item_pose(
+            outputs,
+            header,
+            source_width=message.width,
+            source_height=message.height,
         )
 
         self._frame_count += 1

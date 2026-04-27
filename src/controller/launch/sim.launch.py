@@ -69,6 +69,7 @@ def generate_launch_description() -> LaunchDescription:
                 launch_arguments={
                     "planning_pipeline": planning_pipeline,
                     "use_rviz": use_moveit_rviz,
+                    "use_sim_time": "true",
                 }.items(),
             ),
         ]

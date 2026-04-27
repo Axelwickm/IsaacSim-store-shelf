@@ -24,6 +24,7 @@ setup(
     entry_points={
         "console_scripts": [
             "planner = motion.planner:main",
+            "trajectory_controller = motion.trajectory_controller:main",
         ],
     },
 )

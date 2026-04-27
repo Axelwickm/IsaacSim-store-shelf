@@ -10,6 +10,22 @@
         <group name="left_arm" />
         <group name="right_arm" />
     </group>
+    <group_state name="store_demo_ready" group="both_arms">
+        <joint name="yumi_joint_1_l" value="2.4" />
+        <joint name="yumi_joint_2_l" value="-0.6" />
+        <joint name="yumi_joint_7_l" value="0.2" />
+        <joint name="yumi_joint_3_l" value="0.2" />
+        <joint name="yumi_joint_4_l" value="-1.2" />
+        <joint name="yumi_joint_5_l" value="0.3" />
+        <joint name="yumi_joint_6_l" value="0.0" />
+        <joint name="yumi_joint_1_r" value="-1.2" />
+        <joint name="yumi_joint_2_r" value="-0.8" />
+        <joint name="yumi_joint_7_r" value="-0.4" />
+        <joint name="yumi_joint_3_r" value="-0.6" />
+        <joint name="yumi_joint_4_r" value="1.2" />
+        <joint name="yumi_joint_5_r" value="0.8" />
+        <joint name="yumi_joint_6_r" value="0.0" />
+    </group_state>
     <group name="left_gripper">
         <link name="gripper_l_finger_r" />
         <link name="gripper_l_base" />
@@ -20,8 +36,8 @@
         <link name="gripper_r_finger_r" />
         <link name="gripper_r_finger_l" />
     </group>
-    <end_effector name="left_gripper_ee" parent_link="yumi_link_7_l" group="left_gripper" parent_group="left_arm" />
-    <end_effector name="right_gripper_ee" parent_link="yumi_link_7_r" group="right_gripper" parent_group="right_arm" />
+    <end_effector name="left_gripper_ee" parent_link="gripper_l_grasp_frame" group="left_gripper" parent_group="left_arm" />
+    <end_effector name="right_gripper_ee" parent_link="gripper_r_grasp_frame" group="right_gripper" parent_group="right_arm" />
     <passive_joint name="gripper_l_joint_m" />
     <passive_joint name="gripper_r_joint_m" />
     <passive_joint name="gripper_l_joint" />
