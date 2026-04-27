@@ -85,24 +85,10 @@ class IsaacSimTargetMarkerVisualizer:
         if stage is None:
             return
 
-        from pxr import Gf, Sdf, UsdGeom
+        from pxr import Sdf
 
-        marker_path = f"{self._marker_root_path}_{self._marker_index:03d}"
+        marker_name = f"{self._marker_root_path}_{self._marker_index:03d}"
         self._marker_index += 1
-
-        sphere = UsdGeom.Sphere.Define(stage, Sdf.Path(marker_path))
-        sphere.CreateRadiusAttr().Set(self._marker_radius_meters)
-        sphere.CreateDisplayColorAttr().Set([Gf.Vec3f(1.0, 0.05, 0.0)])
-        sphere.CreateDisplayOpacityAttr().Set([0.45])
-        UsdGeom.Xformable(sphere.GetPrim()).AddTranslateOp().Set(
-            Gf.Vec3d(
-                float(message.point.x),
-                float(message.point.y),
-                float(message.point.z),
-            )
-        )
-
-        self._marker_paths.append(marker_path)
         point = (
             float(message.point.x),
             float(message.point.y),
@@ -110,22 +96,19 @@ class IsaacSimTargetMarkerVisualizer:
         )
         self._debug_draw_points.append(point)
         while len(self._marker_paths) > self._max_markers:
+            self._clear_usd_selection()
             old_marker_path = self._marker_paths.pop(0)
             stage.RemovePrim(Sdf.Path(old_marker_path))
             if self._debug_draw_points:
                 self._debug_draw_points.pop(0)
+        while len(self._debug_draw_points) > self._max_markers:
+            self._debug_draw_points.pop(0)
         self._redraw_debug_markers()
 
-        local_translation, world_translation = self._marker_translations(
-            stage,
-            marker_path,
-        )
         self._node.get_logger().info(
-            "Added Isaac Sim latched target marker "
-            f"path={marker_path} point=({message.point.x:.3f}, "
-            f"{message.point.y:.3f}, {message.point.z:.3f}) "
-            f"local_translation={local_translation} "
-            f"world_translation={world_translation}"
+            "Added Isaac Sim latched target debug marker "
+            f"name={marker_name} point=({message.point.x:.3f}, "
+            f"{message.point.y:.3f}, {message.point.z:.3f})"
         )
 
     def _marker_translations(self, stage, marker_path: str) -> tuple[str, str]:
@@ -227,12 +210,24 @@ class IsaacSimTargetMarkerVisualizer:
 
         from pxr import Sdf
 
+        self._clear_usd_selection()
         for marker_path in self._marker_paths:
             stage.RemovePrim(Sdf.Path(marker_path))
         self._marker_paths.clear()
         self._debug_draw_points.clear()
         self._redraw_debug_markers()
         self._node.get_logger().info("Cleared Isaac Sim latched target markers")
+
+    def _clear_usd_selection(self) -> None:
+        try:
+            import omni.usd
+
+            selection = omni.usd.get_context().get_selection()
+            if selection is None:
+                return
+            selection.clear_selected_prim_paths()
+        except Exception:
+            pass
 
     def close(self) -> None:
         try:

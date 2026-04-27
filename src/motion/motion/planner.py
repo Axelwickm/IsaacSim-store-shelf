@@ -43,6 +43,9 @@ class MotionStep:
     name: str
     pose: PoseStamped | None = None
     gripper_closed: bool | None = None
+    force_top_down: bool = False
+    top_down_tolerance_xyz: tuple[float, float, float] | None = None
+    top_down_weight: float = 1.0
 
 
 REQUIRED_EXTERNAL_PACKAGES = (
@@ -110,11 +113,16 @@ class MotionPlannerNode(Node):
         self.declare_parameter("pregrasp_offset_xyz", [0.0, 0.0, 0.08])
         self.declare_parameter("grasp_offset_xyz", [0.0, 0.0, 0.0])
         self.declare_parameter("retract_offset_xyz", [0.0, 0.0, 0.20])
-        self.declare_parameter("drop_position_xyz", [0.25, -0.35, 0.65])
+        self.declare_parameter("drop_position_xyz", [0.25, -0.14, 0.0])
         self.declare_parameter("position_tolerance", 0.025)
         self.declare_parameter("use_top_down_orientation_constraint", True)
         self.declare_parameter("top_down_orientation_xyzw", [0.0, 1.0, 0.0, 0.0])
         self.declare_parameter("top_down_orientation_tolerance_xyz", [0.9, 0.9, 3.14159])
+        self.declare_parameter(
+            "release_top_down_orientation_tolerance_xyz",
+            [0.25, 0.25, 3.14159],
+        )
+        self.declare_parameter("release_top_down_orientation_weight", 1.0)
         self.declare_parameter("allowed_planning_time", 5.0)
         self.declare_parameter("num_planning_attempts", 5)
         self.declare_parameter("max_velocity_scaling_factor", 0.2)
@@ -189,6 +197,15 @@ class MotionPlannerNode(Node):
         self._top_down_orientation_tolerance_xyz = self._float_list_parameter(
             "top_down_orientation_tolerance_xyz",
             3,
+        )
+        self._release_top_down_orientation_tolerance_xyz = tuple(
+            self._float_list_parameter(
+                "release_top_down_orientation_tolerance_xyz",
+                3,
+            )
+        )
+        self._release_top_down_orientation_weight = float(
+            self.get_parameter("release_top_down_orientation_weight").value
         )
         self._allowed_planning_time = float(
             self.get_parameter("allowed_planning_time").value
@@ -405,6 +422,7 @@ class MotionPlannerNode(Node):
             point.header.stamp,
             self._drop_position_xyz,
         )
+        self._set_top_down_orientation(drop_pose)
         return pregrasp_pose, grasp_pose, retract_pose, drop_pose
 
     def _pose_from_point_offset(
@@ -439,6 +457,12 @@ class MotionPlannerNode(Node):
         pose.pose.orientation.w = 1.0
         return pose
 
+    def _set_top_down_orientation(self, pose: PoseStamped) -> None:
+        pose.pose.orientation.x = self._top_down_orientation_xyzw[0]
+        pose.pose.orientation.y = self._top_down_orientation_xyzw[1]
+        pose.pose.orientation.z = self._top_down_orientation_xyzw[2]
+        pose.pose.orientation.w = self._top_down_orientation_xyzw[3]
+
     def _start_pick_sequence(self, point: PointStamped) -> None:
         if self._pick_in_progress:
             self.get_logger().warning("Pick sequence is already running; ignoring target.")
@@ -450,7 +474,13 @@ class MotionPlannerNode(Node):
             MotionStep("move to grasp", pose=grasp_pose),
             MotionStep("close right gripper", gripper_closed=True),
             MotionStep("retract", pose=retract_pose),
-            MotionStep("move to drop", pose=drop_pose),
+            MotionStep(
+                "move to drop",
+                pose=drop_pose,
+                force_top_down=True,
+                top_down_tolerance_xyz=self._release_top_down_orientation_tolerance_xyz,
+                top_down_weight=self._release_top_down_orientation_weight,
+            ),
             MotionStep("open right gripper", gripper_closed=False),
         ]
         self._pick_sequence_index = 0
@@ -533,7 +563,7 @@ class MotionPlannerNode(Node):
         )
         generation = self._pick_generation
         send_future = self._move_group_client.send_goal_async(
-            self._build_move_group_goal(step.pose)
+            self._build_move_group_goal(step)
         )
         send_future.add_done_callback(
             lambda future, current_step=step, current_generation=generation: self._handle_move_goal_response(
@@ -549,7 +579,10 @@ class MotionPlannerNode(Node):
             self._step_timer = None
         self._execute_next_pick_step()
 
-    def _build_move_group_goal(self, pose: PoseStamped) -> Any:
+    def _build_move_group_goal(self, step: MotionStep) -> Any:
+        if step.pose is None:
+            raise RuntimeError(f"Cannot build MoveGroup goal for {step.name!r} without pose.")
+
         goal = MoveGroup.Goal()
         request = MotionPlanRequest()
         request.group_name = self._right_arm_group
@@ -560,7 +593,7 @@ class MotionPlannerNode(Node):
         request.max_velocity_scaling_factor = self._max_velocity_scaling_factor
         request.max_acceleration_scaling_factor = self._max_acceleration_scaling_factor
         request.start_state = self._build_start_state()
-        request.goal_constraints = [self._build_pose_constraints(pose)]
+        request.goal_constraints = [self._build_pose_constraints(step)]
 
         options = PlanningOptions()
         options.plan_only = self._plan_only
@@ -596,7 +629,11 @@ class MotionPlannerNode(Node):
         start_state.joint_state = deepcopy(self._latest_joint_state)
         return start_state
 
-    def _build_pose_constraints(self, pose: PoseStamped) -> Any:
+    def _build_pose_constraints(self, step: MotionStep) -> Any:
+        if step.pose is None:
+            raise RuntimeError(f"Cannot build pose constraints for {step.name!r} without pose.")
+
+        pose = step.pose
         constraints = Constraints()
         constraints.name = "right_arm_grasp_pose"
 
@@ -613,7 +650,17 @@ class MotionPlannerNode(Node):
         position_constraint.constraint_region.primitive_poses.append(region_pose)
 
         constraints.position_constraints.append(position_constraint)
-        if self._use_top_down_orientation_constraint:
+        if self._use_top_down_orientation_constraint or step.force_top_down:
+            tolerance_xyz = (
+                step.top_down_tolerance_xyz
+                if step.force_top_down and step.top_down_tolerance_xyz is not None
+                else self._top_down_orientation_tolerance_xyz
+            )
+            weight = (
+                step.top_down_weight
+                if step.force_top_down
+                else 0.5
+            )
             orientation_constraint = OrientationConstraint()
             orientation_constraint.header = pose.header
             orientation_constraint.link_name = self._end_effector_link
@@ -621,16 +668,10 @@ class MotionPlannerNode(Node):
             orientation_constraint.orientation.y = self._top_down_orientation_xyzw[1]
             orientation_constraint.orientation.z = self._top_down_orientation_xyzw[2]
             orientation_constraint.orientation.w = self._top_down_orientation_xyzw[3]
-            orientation_constraint.absolute_x_axis_tolerance = (
-                self._top_down_orientation_tolerance_xyz[0]
-            )
-            orientation_constraint.absolute_y_axis_tolerance = (
-                self._top_down_orientation_tolerance_xyz[1]
-            )
-            orientation_constraint.absolute_z_axis_tolerance = (
-                self._top_down_orientation_tolerance_xyz[2]
-            )
-            orientation_constraint.weight = 0.5
+            orientation_constraint.absolute_x_axis_tolerance = tolerance_xyz[0]
+            orientation_constraint.absolute_y_axis_tolerance = tolerance_xyz[1]
+            orientation_constraint.absolute_z_axis_tolerance = tolerance_xyz[2]
+            orientation_constraint.weight = weight
             constraints.orientation_constraints.append(orientation_constraint)
         return constraints
 

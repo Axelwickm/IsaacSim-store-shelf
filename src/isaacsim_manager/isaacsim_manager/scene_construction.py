@@ -10,10 +10,16 @@ ROBOT_PRIM_NAME = "YuMi"
 ITEMS_PRIM_NAME = "all_items"
 CART_PRIM_NAME = "Cart"
 SHELF_PRIM_NAME = "Shelf"
+COLLIDERS_PRIM_NAME = "colliders"
 DEFAULT_CART_Y = -1.0
 DEFAULT_ROBOT_RELATIVE_X = 0.1
 VISION_CAMERA_LINK_PRIM_NAME = "vision_camera_link"
 VISION_CAMERA_OPTICAL_FRAME_PRIM_NAME = "vision_camera_optical_frame"
+DROP_OFF_TARGETS_PRIM_NAME = "DropoffTargets"
+RIGHT_ARM_DROPOFF_PRIM_NAME = "right_arm_dropoff"
+LEFT_ARM_DROPOFF_PRIM_NAME = "left_arm_dropoff"
+RIGHT_ARM_DROPOFF_POSITION_YUMI_BODY = (0.25, -0.14, 0.0)
+LEFT_ARM_DROPOFF_POSITION_YUMI_BODY = (0.25, 0.14, 0.0)
 ITEM_MASS_KG = 0.2
 ROS2_JOINT_GRAPH_PATH = "/ActionGraph/ROS2JointBridge"
 ROS2_CAMERA_GRAPH_PATH = "/ActionGraph/ROS2CameraBridge"
@@ -69,6 +75,14 @@ def find_prim_named(stage, name: str):
     return None
 
 
+def find_prim_named_case_insensitive(stage, name: str):
+    target = name.casefold()
+    for prim in stage.Traverse():
+        if prim.GetName().casefold() == target:
+            return prim
+    return None
+
+
 def prim_local_translation(prim) -> tuple[float, float, float]:
     from pxr import UsdGeom
 
@@ -93,6 +107,27 @@ def set_prim_local_translation(prim, translation: tuple[float, float, float]) ->
 
 def active_children(prim) -> list:
     return [child for child in prim.GetChildren() if child.IsActive()]
+
+
+def apply_static_box_collider(prim) -> None:
+    from pxr import PhysxSchema, UsdGeom, UsdPhysics
+
+    collision_api = UsdPhysics.CollisionAPI.Apply(prim)
+    collision_api.CreateCollisionEnabledAttr().Set(True)
+    if prim.IsA(UsdGeom.Mesh):
+        UsdPhysics.MeshCollisionAPI.Apply(prim).CreateApproximationAttr().Set(
+            "boundingCube"
+        )
+    PhysxSchema.PhysxCollisionAPI.Apply(prim)
+
+    try:
+        from omni.physx.scripts import utils as physx_utils
+
+        physx_utils.setCollider(prim, approximationShape="boundingCube")
+    except Exception:
+        pass
+
+    UsdGeom.Imageable(prim).MakeInvisible()
 
 
 def open_scene(scene_path: str):
@@ -281,6 +316,51 @@ def add_robot_owned_camera(stage, robot_prim_path: str) -> str:
         flush=True,
     )
     return camera_path
+
+
+def add_dropoff_target_markers(stage, robot_prim_path: str) -> dict[str, str]:
+    from pxr import Gf, Sdf, UsdGeom
+
+    robot_mount_prim = get_robot_physical_root_prim(stage, robot_prim_path)
+    root_path = f"{robot_mount_prim.GetPath().pathString}/{DROP_OFF_TARGETS_PRIM_NAME}"
+    root = UsdGeom.Xform.Define(stage, root_path)
+    root_xform = UsdGeom.Xformable(root.GetPrim())
+    root_xform.ClearXformOpOrder()
+    root_xform.AddTranslateOp().Set(Gf.Vec3d(0.0, 0.0, 0.0))
+
+    markers = {
+        "right": (
+            RIGHT_ARM_DROPOFF_PRIM_NAME,
+            RIGHT_ARM_DROPOFF_POSITION_YUMI_BODY,
+            Gf.Vec3f(0.1, 0.45, 1.0),
+        ),
+        "left": (
+            LEFT_ARM_DROPOFF_PRIM_NAME,
+            LEFT_ARM_DROPOFF_POSITION_YUMI_BODY,
+            Gf.Vec3f(1.0, 0.55, 0.1),
+        ),
+    }
+    marker_paths = {}
+    for side, (prim_name, position, color) in markers.items():
+        marker_path = f"{root_path}/{prim_name}"
+        marker = UsdGeom.Cylinder.Define(stage, Sdf.Path(marker_path))
+        marker.CreateRadiusAttr().Set(0.08)
+        marker.CreateHeightAttr().Set(0.015)
+        marker.CreateDisplayColorAttr().Set([color])
+        marker.CreateDisplayOpacityAttr().Set([0.55])
+        marker_xform = UsdGeom.Xformable(marker.GetPrim())
+        marker_xform.ClearXformOpOrder()
+        marker_xform.AddTranslateOp().Set(Gf.Vec3d(*position))
+        marker_paths[side] = marker_path
+
+    print(
+        "[store_shelf] Added dropoff target markers in "
+        f"{ROBOT_PHYSICAL_ROOT_LINK_NAME}: "
+        f"right={RIGHT_ARM_DROPOFF_POSITION_YUMI_BODY}, "
+        f"left={LEFT_ARM_DROPOFF_POSITION_YUMI_BODY}",
+        flush=True,
+    )
+    return marker_paths
 
 
 def configure_ros2_camera_bridge(
@@ -599,7 +679,45 @@ def configure_scene_physics(stage) -> None:
                 )
                 PhysxSchema.PhysxCollisionAPI.Apply(prim)
 
-    print("[store_shelf] Configured item and shelf physics", flush=True)
+    collider_count = 0
+    collider_paths = []
+    collider_descendants = []
+    colliders_prim = find_prim_named_case_insensitive(stage, COLLIDERS_PRIM_NAME)
+    if colliders_prim is not None:
+        UsdGeom.Imageable(colliders_prim).MakeInvisible()
+        for prim in Usd.PrimRange(colliders_prim):
+            collider_descendants.append(
+                f"{prim.GetPath().pathString}:{prim.GetTypeName() or 'typeless'}"
+            )
+            if not prim.IsA(UsdGeom.Gprim):
+                continue
+            apply_static_box_collider(prim)
+            collider_count += 1
+            collider_paths.append(f"{prim.GetPath().pathString}:{prim.GetTypeName()}")
+    else:
+        collider_descendants = [
+            f"{prim.GetPath().pathString}:{prim.GetTypeName() or 'typeless'}"
+            for prim in stage.Traverse()
+            if COLLIDERS_PRIM_NAME in prim.GetPath().pathString.casefold()
+        ]
+
+    print(
+        "[store_shelf] Configured item, shelf, and static collider physics "
+        f"(colliders={collider_count}"
+        + (
+            f", root={colliders_prim.GetPath().pathString}"
+            if colliders_prim is not None
+            else ", root=missing"
+        )
+        + (f", paths={', '.join(collider_paths)}" if collider_paths else "")
+        + (
+            f", descendants={', '.join(collider_descendants)}"
+            if collider_descendants
+            else ""
+        )
+        + ")",
+        flush=True,
+    )
 
 
 def build_item_position_pools(stage) -> list[list]:
@@ -786,8 +904,10 @@ def construct_scene(configuration: str) -> dict:
     robot_prim_path = add_robot_at_cart_origin(stage, robot_path)
     ros2_joint_bridge = None
     ros2_camera_bridge = None
+    dropoff_target_markers = None
     if configuration == "store_demo":
         ros2_joint_bridge = configure_ros2_joint_bridge(stage, robot_prim_path)
+        dropoff_target_markers = add_dropoff_target_markers(stage, robot_prim_path)
         camera_prim_path = add_robot_owned_camera(stage, robot_prim_path)
         ros2_camera_bridge = configure_ros2_camera_bridge(
             stage,
@@ -804,6 +924,7 @@ def construct_scene(configuration: str) -> dict:
         "robot_prim_path": robot_prim_path,
         "ros2_joint_bridge": ros2_joint_bridge,
         "ros2_camera_bridge": ros2_camera_bridge,
+        "dropoff_target_markers": dropoff_target_markers,
         "cart_prim": cart_prim,
         "cart_base_translation": cart_base_translation,
     }
