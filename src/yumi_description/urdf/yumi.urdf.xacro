@@ -8,8 +8,16 @@
   <xacro:include filename="$(find yumi_description)/urdf/yumi.xacro"/>
   <!--Import the yumi servo gripper macro -->
   <xacro:include filename="$(find yumi_description)/urdf/Grippers/yumi_servo_gripper.xacro"/>
+  <!--Import ros2_control bridge for Isaac Sim topic control -->
+  <xacro:include filename="$(find yumi_description)/urdf/yumi.ros2_control.xacro"/>
   <!-- Import Gazebo plugins -->
   <xacro:include filename="$(find yumi_description)/urdf/Gazebo/gazebo.urdf.xacro"/>
+
+  <xacro:arg name="arms_interface" default="PositionJointInterface"/>
+  <xacro:arg name="grippers_interface" default="PositionJointInterface"/>
+  <xacro:arg name="use_ros2_control" default="false"/>
+  <xacro:arg name="joint_states_topic" default="/isaac_joint_states"/>
+  <xacro:arg name="joint_commands_topic" default="/joint_command"/>
 
   <!--yumi-->
   <xacro:yumi name="yumi" hardware_interface="hardware_interface/$(arg arms_interface)">
@@ -25,5 +33,12 @@
   <xacro:yumi_servo_gripper name="gripper_l" hardware_interface="hardware_interface/$(arg grippers_interface)" parent="yumi_link_7_l">
     <origin xyz="0 0 0.007" rpy="0 0 ${PI}" />
   </xacro:yumi_servo_gripper>
+
+  <xacro:if value="$(arg use_ros2_control)">
+    <xacro:yumi_ros2_control
+      name="yumi_topic_ros2_control"
+      joint_states_topic="$(arg joint_states_topic)"
+      joint_commands_topic="$(arg joint_commands_topic)"/>
+  </xacro:if>
 
 </robot>

@@ -1,0 +1,43 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+  <xacro:macro name="yumi_ros2_control" params="name joint_states_topic joint_commands_topic">
+    <ros2_control name="${name}" type="system">
+      <hardware>
+        <plugin>joint_state_topic_hardware_interface/JointStateTopicSystem</plugin>
+        <param name="joint_states_topic">${joint_states_topic}</param>
+        <param name="joint_commands_topic">${joint_commands_topic}</param>
+        <param name="trigger_joint_command_threshold">-1.0</param>
+      </hardware>
+
+      <xacro:macro name="yumi_ros2_control_joint" params="joint_name">
+        <joint name="${joint_name}">
+          <command_interface name="position"/>
+          <state_interface name="position">
+            <param name="initial_value">0.0</param>
+          </state_interface>
+          <state_interface name="velocity"/>
+          <state_interface name="effort"/>
+        </joint>
+      </xacro:macro>
+
+      <xacro:yumi_ros2_control_joint joint_name="yumi_joint_1_l"/>
+      <xacro:yumi_ros2_control_joint joint_name="yumi_joint_2_l"/>
+      <xacro:yumi_ros2_control_joint joint_name="yumi_joint_7_l"/>
+      <xacro:yumi_ros2_control_joint joint_name="yumi_joint_3_l"/>
+      <xacro:yumi_ros2_control_joint joint_name="yumi_joint_4_l"/>
+      <xacro:yumi_ros2_control_joint joint_name="yumi_joint_5_l"/>
+      <xacro:yumi_ros2_control_joint joint_name="yumi_joint_6_l"/>
+
+      <xacro:yumi_ros2_control_joint joint_name="yumi_joint_1_r"/>
+      <xacro:yumi_ros2_control_joint joint_name="yumi_joint_2_r"/>
+      <xacro:yumi_ros2_control_joint joint_name="yumi_joint_7_r"/>
+      <xacro:yumi_ros2_control_joint joint_name="yumi_joint_3_r"/>
+      <xacro:yumi_ros2_control_joint joint_name="yumi_joint_4_r"/>
+      <xacro:yumi_ros2_control_joint joint_name="yumi_joint_5_r"/>
+      <xacro:yumi_ros2_control_joint joint_name="yumi_joint_6_r"/>
+
+      <xacro:yumi_ros2_control_joint joint_name="gripper_l_joint"/>
+      <xacro:yumi_ros2_control_joint joint_name="gripper_r_joint"/>
+    </ros2_control>
+  </xacro:macro>
+</robot>

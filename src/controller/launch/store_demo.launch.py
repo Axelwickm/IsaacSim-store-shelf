@@ -44,12 +44,29 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="cuMotion",
                 description="Planner id requested by the motion planner.",
             ),
+            DeclareLaunchArgument(
+                "controller_spawner_delay",
+                default_value="30.0",
+                description="Seconds to wait before activating ros2_control controllers.",
+            ),
+            DeclareLaunchArgument(
+                "move_group_delay",
+                default_value="5.0",
+                description=(
+                    "Seconds to wait after controller spawners finish before starting "
+                    "move_group."
+                ),
+            ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(str(sim_launch)),
                 launch_arguments={
                     "configuration": "store_demo",
                     "use_moveit": "true",
                     "planning_pipeline": LaunchConfiguration("motion_pipeline_id"),
+                    "controller_spawner_delay": LaunchConfiguration(
+                        "controller_spawner_delay"
+                    ),
+                    "move_group_delay": LaunchConfiguration("move_group_delay"),
                 }.items(),
             ),
             IncludeLaunchDescription(

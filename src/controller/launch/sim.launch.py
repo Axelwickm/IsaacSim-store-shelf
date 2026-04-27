@@ -23,6 +23,8 @@ def generate_launch_description() -> LaunchDescription:
     use_moveit = LaunchConfiguration("use_moveit")
     planning_pipeline = LaunchConfiguration("planning_pipeline")
     use_moveit_rviz = LaunchConfiguration("use_moveit_rviz")
+    controller_spawner_delay = LaunchConfiguration("controller_spawner_delay")
+    move_group_delay = LaunchConfiguration("move_group_delay")
 
     return LaunchDescription(
         [
@@ -51,6 +53,19 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="false",
                 description="Whether to launch RViz for the MoveIt subsystem.",
             ),
+            DeclareLaunchArgument(
+                "controller_spawner_delay",
+                default_value="30.0",
+                description="Seconds to wait before activating ros2_control controllers.",
+            ),
+            DeclareLaunchArgument(
+                "move_group_delay",
+                default_value="5.0",
+                description=(
+                    "Seconds to wait after controller spawners finish before starting "
+                    "move_group."
+                ),
+            ),
             Node(
                 package="controller",
                 executable="controller",
@@ -70,6 +85,8 @@ def generate_launch_description() -> LaunchDescription:
                     "planning_pipeline": planning_pipeline,
                     "use_rviz": use_moveit_rviz,
                     "use_sim_time": "true",
+                    "controller_spawner_delay": controller_spawner_delay,
+                    "move_group_delay": move_group_delay,
                 }.items(),
             ),
         ]

@@ -573,7 +573,9 @@ def find_articulation_root_prim_path(stage, robot_prim_path: str) -> str:
 def configure_ros2_joint_bridge(stage, robot_prim_path: str) -> dict[str, str]:
     import omni.graph.core as og
 
-    joint_state_topic = os.environ.get("ISAACSIM_JOINT_STATE_TOPIC", "/joint_states").strip()
+    joint_state_topic = os.environ.get(
+        "ISAACSIM_JOINT_STATE_TOPIC", "/isaac_joint_states"
+    ).strip()
     joint_command_topic = os.environ.get("ISAACSIM_JOINT_COMMAND_TOPIC", "/joint_command").strip()
     node_namespace = os.environ.get("ISAACSIM_ROS2_NODE_NAMESPACE", "").strip()
     print(

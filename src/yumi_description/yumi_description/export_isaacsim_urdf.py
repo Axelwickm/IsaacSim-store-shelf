@@ -20,6 +20,11 @@ def _make_parser() -> argparse.ArgumentParser:
         default=Path("/workspace/usd/robot/yumi_isaacsim.urdf"),
         help="Destination for the sanitized Isaac Sim URDF.",
     )
+    parser.add_argument(
+        "--with-ros2-control",
+        action="store_true",
+        help="Include the ros2_control topic hardware block in the exported URDF.",
+    )
     return parser
 
 
@@ -78,7 +83,7 @@ def _rewrite_mesh_paths(root: ET.Element, package_share: Path) -> None:
         mesh.set("filename", str((meshes_root / relative_path).resolve()))
 
 
-def export_urdf(output_path: Path) -> Path:
+def export_urdf(output_path: Path, *, with_ros2_control: bool = False) -> Path:
     package_share = Path(get_package_share_directory("yumi_description"))
     xacro_file = package_share / "urdf" / "yumi.urdf.xacro"
     document = xacro.process_file(
@@ -86,6 +91,9 @@ def export_urdf(output_path: Path) -> Path:
         mappings={
             "arms_interface": "PositionJointInterface",
             "grippers_interface": "PositionJointInterface",
+            "use_ros2_control": "true" if with_ros2_control else "false",
+            "joint_states_topic": "/isaac_joint_states",
+            "joint_commands_topic": "/joint_command",
         },
     )
     root = ET.fromstring(document.toprettyxml(indent="  "))
@@ -104,7 +112,10 @@ def export_urdf(output_path: Path) -> Path:
 
 def main() -> None:
     args = _make_parser().parse_args()
-    output_path = export_urdf(args.output.resolve())
+    output_path = export_urdf(
+        args.output.resolve(),
+        with_ros2_control=args.with_ros2_control,
+    )
     print(f"Wrote Isaac Sim YuMi URDF to {output_path}")
 
 

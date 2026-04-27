@@ -101,6 +101,19 @@ RELEASE_TARGET_ON_MOVEIT_ERROR_CODES = {
     -29,    # NO_IK_SOLUTION
 }
 
+MOVE_GROUP_SERVER_WAIT_SECONDS = 5.0
+MOVE_GROUP_SERVER_RETRY_SECONDS = 2.0
+JOINT_POSITION_LIMITS = {
+    "yumi_joint_1_r": (-2.93, 2.93),
+    "yumi_joint_2_r": (-2.49, 0.74),
+    "yumi_joint_7_r": (-2.93, 2.93),
+    "yumi_joint_3_r": (-2.14, 1.38),
+    "yumi_joint_4_r": (-5.0, 5.0),
+    "yumi_joint_5_r": (-1.52, 2.36),
+    "yumi_joint_6_r": (-3.95, 3.95),
+}
+
+
 class MotionPlannerNode(Node):
     def __init__(self) -> None:
         super().__init__("motion_planner")
@@ -137,14 +150,14 @@ class MotionPlannerNode(Node):
         self.declare_parameter("top_down_orientation_tolerance_xyz", [0.9, 0.9, 3.14159])
         self.declare_parameter(
             "release_top_down_orientation_tolerance_xyz",
-            [0.25, 0.25, 3.14159],
+            [0.9, 0.9, 3.14159],
         )
-        self.declare_parameter("release_top_down_orientation_weight", 1.0)
+        self.declare_parameter("release_top_down_orientation_weight", 0.5)
         self.declare_parameter("allowed_planning_time", 5.0)
         self.declare_parameter("move_group_result_timeout", 30.0)
         self.declare_parameter("num_planning_attempts", 5)
-        self.declare_parameter("max_velocity_scaling_factor", 0.2)
-        self.declare_parameter("max_acceleration_scaling_factor", 0.2)
+        self.declare_parameter("max_velocity_scaling_factor", 0.08)
+        self.declare_parameter("max_acceleration_scaling_factor", 0.08)
 
         self._validate_external_dependencies()
 
@@ -313,8 +326,7 @@ class MotionPlannerNode(Node):
             f"pipeline={pipeline_id}, planner={planner_id}, plan_only={self._plan_only})"
         )
         self.get_logger().info(
-            f"Listening for target poses on {target_pose_topic}. "
-            "Next step is wiring this node to MoveIt's action or planning interface."
+            f"Listening for target poses on {target_pose_topic}."
         )
         self.get_logger().info(
             f"Listening for selected item points on {selected_item_point_topic}; "
@@ -565,32 +577,33 @@ class MotionPlannerNode(Node):
 
         if step.pose is None:
             self.get_logger().error(f"Pick step {step.name!r} has no target pose.")
-            self._pick_in_progress = False
-            # self._release_latched_target("invalid pick")
+            self._fail_pick_sequence()
             return
 
         if not MOVEIT_ACTIONS_AVAILABLE or self._move_group_client is None:
             self.get_logger().warning(
                 f"Cannot execute {step.name!r}; MoveGroup action support is unavailable."
             )
-            self._pick_in_progress = False
-            # self._release_latched_target("unexecutable pick")
+            self._fail_pick_sequence()
             return
         if self._move_group_goal_may_be_active:
             self.get_logger().error(
                 "Not sending a new MoveGroup goal because the previous goal may still "
                 "be active inside MoveGroup. Restart move_group before retrying."
             )
-            self._pick_in_progress = False
-            # self._release_latched_target("blocked pick")
+            self._fail_pick_sequence()
             return
 
         if not self._move_group_client.server_is_ready():
             self.get_logger().info("Waiting for MoveGroup action server...")
-            if not self._move_group_client.wait_for_server(timeout_sec=5.0):
-                self.get_logger().error("MoveGroup action server is not available.")
-                self._pick_in_progress = False
-                # self._release_latched_target("unavailable MoveGroup pick")
+            if not self._move_group_client.wait_for_server(
+                timeout_sec=MOVE_GROUP_SERVER_WAIT_SECONDS
+            ):
+                self.get_logger().warning(
+                    "MoveGroup action server is not available yet; retrying pick step "
+                    f"{step.name!r}."
+                )
+                self._retry_current_pick_step()
                 return
 
         self.get_logger().info(
@@ -616,6 +629,16 @@ class MotionPlannerNode(Node):
             self._step_timer.cancel()
             self._step_timer = None
         self._execute_next_pick_step()
+
+    def _retry_current_pick_step(self) -> None:
+        self._pick_sequence_index = max(self._pick_sequence_index - 1, 0)
+        self._step_timer = self.create_timer(
+            MOVE_GROUP_SERVER_RETRY_SECONDS,
+            self._execute_next_pick_step_once,
+        )
+
+    def _fail_pick_sequence(self) -> None:
+        self._pick_in_progress = False
 
     def _build_move_group_goal(self, step: MotionStep) -> Any:
         if step.pose is None:
@@ -665,7 +688,19 @@ class MotionPlannerNode(Node):
         start_state = RobotState()
         start_state.is_diff = False
         start_state.joint_state = deepcopy(self._latest_joint_state)
+        self._clamp_start_state_to_joint_limits(start_state.joint_state)
         return start_state
+
+    def _clamp_start_state_to_joint_limits(self, joint_state: JointState) -> None:
+        for index, joint_name in enumerate(joint_state.name):
+            limits = JOINT_POSITION_LIMITS.get(joint_name)
+            if limits is None or index >= len(joint_state.position):
+                continue
+            lower, upper = limits
+            joint_state.position[index] = min(
+                max(joint_state.position[index], lower),
+                upper,
+            )
 
     def _build_pose_constraints(self, step: MotionStep) -> Any:
         if step.pose is None:

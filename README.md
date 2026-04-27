@@ -72,6 +72,29 @@ The canonical YuMi source now lives in the ROS 2 package `src/yumi_description`.
 docker compose run --rm ros2 bash -lc "source /opt/ros/jazzy/setup.bash && colcon build --symlink-install && source install/setup.bash && ros2 run yumi_description export_isaacsim_urdf"
 ```
 
+Inside an already sourced ROS 2 container, the equivalent direct command is:
+
+```bash
+ros2 run yumi_description export_isaacsim_urdf
+```
+
+To choose the output path explicitly:
+
+```bash
+ros2 run yumi_description export_isaacsim_urdf -- --output /workspace/usd/robot/yumi_isaacsim.urdf
+```
+
+To validate/export the MoveIt-side `ros2_control` block as part of the URDF:
+
+```bash
+ros2 run yumi_description export_isaacsim_urdf -- --with-ros2-control --output /tmp/yumi_ros2_control.urdf
+```
+
+The Isaac Sim joint bridge publishes raw simulated joint states on
+`/isaac_joint_states`. The ros2_control topic hardware consumes that topic, then
+`joint_state_broadcaster` publishes the normalized MoveIt-facing `/joint_states`
+topic.
+
 This keeps MoveIt and Isaac Sim derived from the same YuMi description instead of maintaining separate robot definitions by hand.
 
 ## Isaac Sim GUI
