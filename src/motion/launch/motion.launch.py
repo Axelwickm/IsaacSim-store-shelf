@@ -1,6 +1,5 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -12,8 +11,6 @@ def generate_launch_description() -> LaunchDescription:
     target_pose_topic = LaunchConfiguration("target_pose_topic")
     plan_only = LaunchConfiguration("plan_only")
     move_group_result_timeout = LaunchConfiguration("move_group_result_timeout")
-    goal_settle_timeout = LaunchConfiguration("goal_settle_timeout")
-    use_fake_trajectory_controller = LaunchConfiguration("use_fake_trajectory_controller")
 
     return LaunchDescription(
         [
@@ -47,16 +44,6 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="30.0",
                 description="Seconds to wait for a MoveGroup action result, including execution.",
             ),
-            DeclareLaunchArgument(
-                "goal_settle_timeout",
-                default_value="5.0",
-                description="Seconds for the local trajectory controller to wait for final joint settle.",
-            ),
-            DeclareLaunchArgument(
-                "use_fake_trajectory_controller",
-                default_value="false",
-                description="Launch the legacy Python FollowJointTrajectory relay.",
-            ),
             Node(
                 package="motion",
                 executable="planner",
@@ -70,18 +57,6 @@ def generate_launch_description() -> LaunchDescription:
                         "target_pose_topic": target_pose_topic,
                         "plan_only": plan_only,
                         "move_group_result_timeout": move_group_result_timeout,
-                    }
-                ],
-            ),
-            Node(
-                condition=IfCondition(use_fake_trajectory_controller),
-                package="motion",
-                executable="trajectory_controller",
-                name="right_arm_trajectory_controller",
-                output="screen",
-                parameters=[
-                    {
-                        "goal_settle_timeout": goal_settle_timeout,
                     }
                 ],
             ),

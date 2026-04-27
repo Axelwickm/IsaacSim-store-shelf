@@ -1,22 +1,19 @@
 import threading
-import time
 from copy import deepcopy
+from dataclasses import dataclass
 
+import numpy as np
 from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionServer, CancelResponse, GoalResponse
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
-from sensor_msgs.msg import JointState
 from trajectory_msgs.msg import JointTrajectoryPoint
 
 
 DEFAULT_ACTION_NAME = "right_arm_controller/follow_joint_trajectory"
-DEFAULT_JOINT_COMMAND_TOPIC = "/joint_command"
-DEFAULT_JOINT_STATE_TOPIC = "/isaac_joint_states"
 DEFAULT_GOAL_POSITION_TOLERANCE = 0.15
 DEFAULT_STOPPED_VELOCITY_TOLERANCE = 0.2
 DEFAULT_GOAL_TIME_TOLERANCE_SECONDS = 4.0
-COMMAND_RATE_HZ = 60.0
 RESULT_SUCCESSFUL = 0
 RESULT_GOAL_TOLERANCE_VIOLATED = -5
 RIGHT_ARM_JOINTS = (
@@ -30,15 +27,28 @@ RIGHT_ARM_JOINTS = (
 )
 
 
+@dataclass
+class ActiveTrajectory:
+    goal_handle: object
+    joint_names: list[str]
+    joint_indices: np.ndarray | None
+    points: list[JointTrajectoryPoint]
+    final_time: float
+    elapsed: float = 0.0
+    settle_elapsed: float = 0.0
+    done_event: threading.Event | None = None
+    result: FollowJointTrajectory.Result | None = None
+
+
 def _duration_seconds(duration) -> float:
     return float(duration.sec) + float(duration.nanosec) * 1e-9
 
 
-def _point_time(point) -> float:
+def _point_time(point: JointTrajectoryPoint) -> float:
     return _duration_seconds(point.time_from_start)
 
 
-def _result(error_code: int, error_string: str = ""):
+def _result(error_code: int, error_string: str = "") -> FollowJointTrajectory.Result:
     result = FollowJointTrajectory.Result()
     result.error_code = error_code
     result.error_string = error_string
@@ -49,32 +59,20 @@ class IsaacSimTrajectoryExecutor:
     def __init__(
         self,
         *,
+        articulation_root_path: str,
         action_name: str = DEFAULT_ACTION_NAME,
-        joint_command_topic: str = DEFAULT_JOINT_COMMAND_TOPIC,
-        joint_state_topic: str = DEFAULT_JOINT_STATE_TOPIC,
     ) -> None:
+        self._articulation_root_path = articulation_root_path
         self._action_name = action_name
-        self._joint_command_topic = joint_command_topic
-        self._joint_state_topic = joint_state_topic
-        self._latest_joint_state: JointState | None = None
-        self._latest_joint_positions: dict[str, float] = {}
-        self._latest_joint_velocities: dict[str, float] = {}
-        self._state_lock = threading.Lock()
+        self._active: ActiveTrajectory | None = None
+        self._lock = threading.Lock()
+        self._articulation = None
+        self._articulation_controller = None
+        self._articulation_action_type = None
 
         self._node = Node("isaacsim_follow_joint_trajectory")
         self._executor = MultiThreadedExecutor(num_threads=2)
         self._executor.add_node(self._node)
-        self._joint_command_publisher = self._node.create_publisher(
-            JointState,
-            joint_command_topic,
-            10,
-        )
-        self._joint_state_subscription = self._node.create_subscription(
-            JointState,
-            joint_state_topic,
-            self._handle_joint_state,
-            10,
-        )
         self._action_server = ActionServer(
             self._node,
             FollowJointTrajectory,
@@ -90,9 +88,8 @@ class IsaacSimTrajectoryExecutor:
         )
         self._spin_thread.start()
         self._node.get_logger().info(
-            "Isaac Sim trajectory executor ready "
-            f"(action={action_name}, command_topic={joint_command_topic}, "
-            f"state_topic={joint_state_topic})"
+            "Isaac Sim direct trajectory executor ready "
+            f"(action={action_name}, articulation={articulation_root_path})"
         )
 
     def _handle_goal_request(self, goal_request) -> GoalResponse:
@@ -106,74 +103,119 @@ class IsaacSimTrajectoryExecutor:
         if not trajectory.points:
             self._node.get_logger().error("Rejecting empty trajectory.")
             return GoalResponse.REJECT
+        with self._lock:
+            if self._active is not None:
+                self._node.get_logger().warning("Rejecting trajectory while one is active.")
+                return GoalResponse.REJECT
         return GoalResponse.ACCEPT
 
     def _handle_cancel_request(self, _goal_handle) -> CancelResponse:
         return CancelResponse.ACCEPT
 
-    def _handle_joint_state(self, message: JointState) -> None:
-        positions = {}
-        velocities = {}
-        for index, joint_name in enumerate(message.name):
-            if index < len(message.position):
-                positions[joint_name] = float(message.position[index])
-            if index < len(message.velocity):
-                velocities[joint_name] = float(message.velocity[index])
-        with self._state_lock:
-            self._latest_joint_state = deepcopy(message)
-            self._latest_joint_positions = positions
-            self._latest_joint_velocities = velocities
-
     def _execute_goal(self, goal_handle):
-        trajectory = goal_handle.request.trajectory
-        points = list(trajectory.points)
-        joint_names = list(trajectory.joint_names)
+        done_event = threading.Event()
+        points = list(goal_handle.request.trajectory.points)
+        active = ActiveTrajectory(
+            goal_handle=goal_handle,
+            joint_names=list(goal_handle.request.trajectory.joint_names),
+            joint_indices=None,
+            points=points,
+            final_time=_point_time(points[-1]),
+            done_event=done_event,
+        )
+        with self._lock:
+            self._active = active
         self._node.get_logger().info(
-            f"Executing Isaac Sim trajectory with {len(points)} points."
+            f"Executing direct Isaac Sim trajectory with {len(points)} points."
+        )
+        done_event.wait()
+        return active.result or _result(
+            RESULT_GOAL_TOLERANCE_VIOLATED,
+            "trajectory ended without result",
         )
 
-        start_time = time.monotonic()
-        final_time = _point_time(points[-1])
-        command_period = 1.0 / COMMAND_RATE_HZ
+    def update(self, dt: float) -> None:
+        if self._active is None:
+            return
+        self._ensure_articulation()
+        with self._lock:
+            active = self._active
+        if active is None:
+            return
+        if active.joint_indices is None:
+            active.joint_indices = self._joint_indices(active.joint_names)
 
-        while True:
-            if goal_handle.is_cancel_requested:
-                goal_handle.canceled()
-                return _result(
-                    RESULT_SUCCESSFUL,
-                    "Trajectory canceled.",
-                )
+        goal_handle = active.goal_handle
+        if goal_handle.is_cancel_requested:
+            goal_handle.canceled()
+            self._finish(active, RESULT_SUCCESSFUL, "Trajectory canceled.")
+            return
 
-            elapsed = time.monotonic() - start_time
-            command_point = self._interpolated_point(points, elapsed)
-            self._publish_command(joint_names, command_point)
-            self._publish_feedback(goal_handle, joint_names, command_point)
+        active.elapsed += dt
+        if active.elapsed < active.final_time:
+            command_point = self._interpolated_point(active.points, active.elapsed)
+            self._apply_action(active, command_point)
+            self._publish_feedback(active, command_point)
+            return
 
-            if elapsed >= final_time:
-                break
-            time.sleep(command_period)
+        final_point = active.points[-1]
+        self._apply_action(active, final_point)
+        self._publish_feedback(active, final_point)
+        if self._goal_reached(active, final_point):
+            goal_handle.succeed()
+            self._finish(active, RESULT_SUCCESSFUL)
+            self._node.get_logger().info("Direct Isaac Sim trajectory goal reached.")
+            return
 
-        final_point = points[-1]
-        deadline = time.monotonic() + self._goal_time_tolerance(goal_handle)
-        while time.monotonic() < deadline:
-            if goal_handle.is_cancel_requested:
-                goal_handle.canceled()
-                return _result(
-                    RESULT_SUCCESSFUL,
-                    "Trajectory canceled.",
-                )
-            self._publish_command(joint_names, final_point)
-            self._publish_feedback(goal_handle, joint_names, final_point)
-            if self._goal_reached(joint_names, final_point):
-                goal_handle.succeed()
-                self._node.get_logger().info("Isaac Sim trajectory goal reached.")
-                return _result(RESULT_SUCCESSFUL)
-            time.sleep(command_period)
+        active.settle_elapsed += dt
+        if active.settle_elapsed <= self._goal_time_tolerance(goal_handle):
+            return
 
-        error = self._goal_error_summary(joint_names, final_point)
+        error = self._goal_error_summary(active, final_point)
         goal_handle.abort()
-        self._node.get_logger().warning(f"Isaac Sim trajectory did not settle: {error}")
-        return _result(RESULT_GOAL_TOLERANCE_VIOLATED, error)
+        self._finish(active, RESULT_GOAL_TOLERANCE_VIOLATED, error)
+        self._node.get_logger().warning(f"Direct Isaac Sim trajectory did not settle: {error}")
+
+    def _finish(self, active: ActiveTrajectory, error_code: int, error_string: str = "") -> None:
+        active.result = _result(error_code, error_string)
+        with self._lock:
+            if self._active is active:
+                self._active = None
+        if active.done_event is not None:
+            active.done_event.set()
+
+    def _ensure_articulation(self) -> None:
+        if self._articulation is not None:
+            return
+        try:
+            from isaacsim.core.api.controllers.articulation_controller import (
+                ArticulationController,
+            )
+            from isaacsim.core.prims import SingleArticulation
+            from isaacsim.core.utils.types import ArticulationAction
+        except ImportError:
+            from omni.isaac.core.articulations import Articulation as SingleArticulation
+            from omni.isaac.core.controllers import ArticulationController
+            from omni.isaac.core.utils.types import ArticulationAction
+
+        self._articulation_action_type = ArticulationAction
+        self._articulation = SingleArticulation(
+            prim_path=self._articulation_root_path,
+            name="yumi_direct_trajectory_articulation",
+        )
+        self._articulation.initialize()
+        self._articulation_controller = ArticulationController()
+        self._articulation_controller.initialize(self._articulation)
+        self._node.get_logger().info(
+            "Initialized direct Isaac articulation controller for "
+            f"{self._articulation_root_path}"
+        )
+
+    def _joint_indices(self, joint_names: list[str]) -> np.ndarray:
+        return np.array(
+            [self._articulation.get_dof_index(joint_name) for joint_name in joint_names],
+            dtype=np.int32,
+        )
 
     def _goal_time_tolerance(self, goal_handle) -> float:
         tolerance = _duration_seconds(goal_handle.request.goal_time_tolerance)
@@ -181,7 +223,11 @@ class IsaacSimTrajectoryExecutor:
             return tolerance
         return DEFAULT_GOAL_TIME_TOLERANCE_SECONDS
 
-    def _interpolated_point(self, points, elapsed: float):
+    def _interpolated_point(
+        self,
+        points: list[JointTrajectoryPoint],
+        elapsed: float,
+    ) -> JointTrajectoryPoint:
         if elapsed <= _point_time(points[0]):
             return points[0]
         for next_index in range(1, len(points)):
@@ -208,50 +254,51 @@ class IsaacSimTrajectoryExecutor:
             return point
         return points[-1]
 
-    def _publish_command(self, joint_names: list[str], point) -> None:
-        message = JointState()
-        message.header.stamp = self._node.get_clock().now().to_msg()
-        message.name = joint_names
-        message.position = list(point.positions)
-        if point.velocities:
-            message.velocity = list(point.velocities)
-        self._joint_command_publisher.publish(message)
+    def _apply_action(self, active: ActiveTrajectory, point: JointTrajectoryPoint) -> None:
+        action = self._articulation_action_type(
+            joint_positions=np.array(point.positions, dtype=np.float64),
+            joint_indices=active.joint_indices,
+        )
+        self._articulation_controller.apply_action(action)
 
-    def _publish_feedback(self, goal_handle, joint_names: list[str], desired) -> None:
-        actual = self._actual_point(joint_names)
-        if actual is None:
-            return
+    def _publish_feedback(
+        self,
+        active: ActiveTrajectory,
+        desired: JointTrajectoryPoint,
+    ) -> None:
+        actual = self._actual_point(active)
         feedback = FollowJointTrajectory.Feedback()
-        feedback.joint_names = joint_names
+        feedback.joint_names = active.joint_names
         feedback.desired = desired
         feedback.actual = actual
         feedback.error.positions = [
             actual.positions[index] - desired.positions[index]
-            for index in range(len(joint_names))
+            for index in range(len(active.joint_names))
         ]
         if desired.velocities and actual.velocities:
             feedback.error.velocities = [
                 actual.velocities[index] - desired.velocities[index]
-                for index in range(len(joint_names))
+                for index in range(len(active.joint_names))
             ]
-        goal_handle.publish_feedback(feedback)
+        active.goal_handle.publish_feedback(feedback)
 
-    def _actual_point(self, joint_names: list[str]):
-        with self._state_lock:
-            positions = [self._latest_joint_positions.get(name) for name in joint_names]
-            velocities = [self._latest_joint_velocities.get(name, 0.0) for name in joint_names]
-        if any(position is None for position in positions):
-            return None
+    def _actual_point(self, active: ActiveTrajectory) -> JointTrajectoryPoint:
         point = JointTrajectoryPoint()
-        point.positions = [float(position) for position in positions]
-        point.velocities = [float(velocity) for velocity in velocities]
+        point.positions = list(
+            self._articulation.get_joint_positions(joint_indices=active.joint_indices)
+        )
+        point.velocities = list(
+            self._articulation.get_joint_velocities(joint_indices=active.joint_indices)
+        )
         return point
 
-    def _goal_reached(self, joint_names: list[str], final_point) -> bool:
-        actual = self._actual_point(joint_names)
-        if actual is None:
-            return False
-        for index in range(len(joint_names)):
+    def _goal_reached(
+        self,
+        active: ActiveTrajectory,
+        final_point: JointTrajectoryPoint,
+    ) -> bool:
+        actual = self._actual_point(active)
+        for index in range(len(active.joint_names)):
             position_error = abs(actual.positions[index] - final_point.positions[index])
             velocity = abs(actual.velocities[index]) if actual.velocities else 0.0
             if position_error > DEFAULT_GOAL_POSITION_TOLERANCE:
@@ -260,12 +307,14 @@ class IsaacSimTrajectoryExecutor:
                 return False
         return True
 
-    def _goal_error_summary(self, joint_names: list[str], final_point) -> str:
-        actual = self._actual_point(joint_names)
-        if actual is None:
-            return "no complete joint feedback"
+    def _goal_error_summary(
+        self,
+        active: ActiveTrajectory,
+        final_point: JointTrajectoryPoint,
+    ) -> str:
+        actual = self._actual_point(active)
         errors = []
-        for index, joint_name in enumerate(joint_names):
+        for index, joint_name in enumerate(active.joint_names):
             errors.append(
                 f"{joint_name}: position_error="
                 f"{actual.positions[index] - final_point.positions[index]:.4f}, "

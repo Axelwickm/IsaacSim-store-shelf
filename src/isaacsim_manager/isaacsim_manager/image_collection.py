@@ -318,6 +318,8 @@ def update_simulation_app(simulation_app) -> None:
         _vision_panel.update()
     if _target_marker_visualizer is not None:
         _target_marker_visualizer.update()
+    if _trajectory_executor is not None:
+        _trajectory_executor.update(SIMULATION_STEP_SECONDS)
     if _flow_state is None:
         return
     if _flow_state["mode"] == "collect":
@@ -489,7 +491,9 @@ def _setup_store_shelf_scene(
     if configuration == "store_demo":
         if not rclpy.ok():
             rclpy.init(args=None)
-        _trajectory_executor = IsaacSimTrajectoryExecutor()
+        _trajectory_executor = IsaacSimTrajectoryExecutor(
+            articulation_root_path=scene["ros2_joint_bridge"]["articulation_root_path"],
+        )
     if _timeline_autoplay_enabled:
         if _play_timeline_if_needed():
             print(
