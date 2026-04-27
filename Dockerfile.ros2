@@ -47,18 +47,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-opencv \
     python3-rosdep \
     ros-dev-tools \
+    ros-jazzy-control-msgs \
     ros-jazzy-cv-bridge \
     ros-jazzy-controller-manager \
     ros-jazzy-joint-state-broadcaster \
     ros-jazzy-joint-state-topic-hardware-interface \
-    ros-jazzy-joint-trajectory-controller \
     ros-jazzy-launch \
     ros-jazzy-launch-ros \
     ros-jazzy-moveit \
     ros-jazzy-moveit-common \
     ros-jazzy-moveit-msgs \
     ros-jazzy-moveit-planners-ompl \
-    ros-jazzy-moveit-ros-control-interface \
     ros-jazzy-moveit-resources-panda-description \
     ros-jazzy-moveit-resources-panda-moveit-config \
     ros-jazzy-rclpy \
@@ -66,6 +65,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ros-jazzy-ros2launch \
     ros-jazzy-rviz2 \
     ros-jazzy-std-msgs \
+    ros-jazzy-trajectory-msgs \
     ros-jazzy-ur-moveit-config \
     ros-jazzy-ur-robot-driver \
     ros-jazzy-vision-msgs \

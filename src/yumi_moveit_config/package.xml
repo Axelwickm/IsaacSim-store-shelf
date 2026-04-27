@@ -13,9 +13,7 @@
   <depend>controller_manager</depend>
   <depend>joint_state_broadcaster</depend>
   <depend>joint_state_topic_hardware_interface</depend>
-  <depend>joint_trajectory_controller</depend>
   <depend>moveit_configs_utils</depend>
-  <depend>moveit_ros_control_interface</depend>
   <depend>moveit_ros_move_group</depend>
   <depend>robot_state_publisher</depend>
   <depend>rviz2</depend>

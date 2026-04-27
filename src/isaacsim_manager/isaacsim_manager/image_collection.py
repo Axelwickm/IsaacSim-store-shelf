@@ -29,6 +29,7 @@ from .target_marker_visualizer import (
     DEFAULT_MARKER_RADIUS_METERS,
     IsaacSimTargetMarkerVisualizer,
 )
+from .trajectory_executor import IsaacSimTrajectoryExecutor
 
 
 DEFAULT_REPLICATOR_OUTPUT_DIR = "/workspace/collect_vision_data_output"
@@ -46,6 +47,7 @@ _replicator_capture_enabled = False
 _timeline_autoplay_enabled = False
 _vision_panel = None
 _target_marker_visualizer = None
+_trajectory_executor = None
 _flow_state = None
 
 
@@ -333,6 +335,7 @@ def _setup_store_shelf_scene(
     global _timeline_autoplay_enabled
     global _vision_panel
     global _target_marker_visualizer
+    global _trajectory_executor
     global _flow_state
 
     _replicator_capture_enabled = False
@@ -344,6 +347,9 @@ def _setup_store_shelf_scene(
     if _target_marker_visualizer is not None:
         _target_marker_visualizer.close()
         _target_marker_visualizer = None
+    if _trajectory_executor is not None:
+        _trajectory_executor.close()
+        _trajectory_executor = None
 
     scene = construct_scene(configuration)
     _timeline_autoplay_enabled = (
@@ -480,6 +486,10 @@ def _setup_store_shelf_scene(
             f"frame_id={scene['ros2_camera_bridge']['camera_frame_id']}",
             flush=True,
         )
+    if configuration == "store_demo":
+        if not rclpy.ok():
+            rclpy.init(args=None)
+        _trajectory_executor = IsaacSimTrajectoryExecutor()
     if _timeline_autoplay_enabled:
         if _play_timeline_if_needed():
             print(

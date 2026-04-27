@@ -127,7 +127,6 @@ def generate_launch_description() -> LaunchDescription:
     )
 
     joint_state_broadcaster_spawner = controller_spawner("joint_state_broadcaster")
-    right_arm_controller_spawner = controller_spawner("right_arm_controller")
 
     robot_state_publisher_node = Node(
         package="robot_state_publisher",
@@ -187,12 +186,6 @@ def generate_launch_description() -> LaunchDescription:
         RegisterEventHandler(
             OnProcessExit(
                 target_action=joint_state_broadcaster_spawner,
-                on_exit=[right_arm_controller_spawner],
-            )
-        ),
-        RegisterEventHandler(
-            OnProcessExit(
-                target_action=right_arm_controller_spawner,
                 on_exit=[
                     TimerAction(period=move_group_delay, actions=[move_group_node])
                 ],
