@@ -66,6 +66,9 @@ YUMI_STORE_DEMO_READY_JOINT_POSITIONS_RAD = {
     "yumi_joint_5_r": 0.8,
     "yumi_joint_6_r": 0.0,
 }
+DEFAULT_ARM_DRIVE_STIFFNESS = 10000.0
+DEFAULT_ARM_DRIVE_DAMPING = 1000.0
+DEFAULT_ARM_DRIVE_MAX_FORCE = 5000.0
 
 
 def find_prim_named(stage, name: str):
@@ -81,6 +84,21 @@ def find_prim_named_case_insensitive(stage, name: str):
         if prim.GetName().casefold() == target:
             return prim
     return None
+
+
+def float_env(name: str, default: float) -> float:
+    value = os.environ.get(name)
+    if value is None or not value.strip():
+        return default
+    try:
+        return float(value)
+    except ValueError:
+        print(
+            f"[store_shelf] Ignoring invalid float env {name}={value!r}; "
+            f"using {default}",
+            flush=True,
+        )
+        return default
 
 
 def prim_local_translation(prim) -> tuple[float, float, float]:
@@ -822,6 +840,43 @@ def set_robot_arm_joints(
     return applied_positions
 
 
+def configure_robot_arm_drives(stage, robot_prim_path: str) -> None:
+    from pxr import Usd, UsdPhysics
+
+    stiffness = float_env(
+        "ISAACSIM_ARM_DRIVE_STIFFNESS",
+        DEFAULT_ARM_DRIVE_STIFFNESS,
+    )
+    damping = float_env("ISAACSIM_ARM_DRIVE_DAMPING", DEFAULT_ARM_DRIVE_DAMPING)
+    max_force = float_env(
+        "ISAACSIM_ARM_DRIVE_MAX_FORCE",
+        DEFAULT_ARM_DRIVE_MAX_FORCE,
+    )
+
+    configured_joints = []
+    robot_prim = stage.GetPrimAtPath(robot_prim_path)
+    if not robot_prim.IsValid():
+        return
+
+    for prim in Usd.PrimRange(robot_prim):
+        joint_name = prim.GetName()
+        if joint_name not in YUMI_ARM_JOINT_LIMITS_RAD:
+            continue
+
+        drive = UsdPhysics.DriveAPI.Apply(prim, "angular")
+        drive.CreateStiffnessAttr().Set(stiffness)
+        drive.CreateDampingAttr().Set(damping)
+        drive.CreateMaxForceAttr().Set(max_force)
+        configured_joints.append(joint_name)
+
+    print(
+        "[store_shelf] Configured arm joint drives "
+        f"(stiffness={stiffness:g}, damping={damping:g}, max_force={max_force:g}) "
+        f"for {len(configured_joints)} joints",
+        flush=True,
+    )
+
+
 def randomize_robot_arm_joints(stage, robot_prim_path: str) -> dict[str, float]:
     sampled_positions = {
         joint_name: random.uniform(lower, upper)
@@ -904,6 +959,7 @@ def construct_scene(configuration: str) -> dict:
     )
 
     robot_prim_path = add_robot_at_cart_origin(stage, robot_path)
+    configure_robot_arm_drives(stage, robot_prim_path)
     ros2_joint_bridge = None
     ros2_camera_bridge = None
     dropoff_target_markers = None

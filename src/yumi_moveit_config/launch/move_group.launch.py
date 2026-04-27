@@ -96,6 +96,9 @@ def generate_launch_description() -> LaunchDescription:
         "publish_transforms_updates": False,
         "monitor_dynamics": False,
     }
+    start_state_bounds_parameters = {
+        "start_state_max_bounds_error": 0.02,
+    }
 
     move_group_node = Node(
         package="moveit_ros_move_group",
@@ -107,6 +110,7 @@ def generate_launch_description() -> LaunchDescription:
             trajectory_execution,
             moveit_controllers,
             planning_scene_monitor_parameters,
+            start_state_bounds_parameters,
             {"use_sim_time": use_sim_time},
         ],
     )
