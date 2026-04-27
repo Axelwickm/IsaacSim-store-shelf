@@ -10,6 +10,8 @@ def generate_launch_description() -> LaunchDescription:
     planner_id = LaunchConfiguration("planner_id")
     target_pose_topic = LaunchConfiguration("target_pose_topic")
     plan_only = LaunchConfiguration("plan_only")
+    move_group_result_timeout = LaunchConfiguration("move_group_result_timeout")
+    goal_settle_timeout = LaunchConfiguration("goal_settle_timeout")
 
     return LaunchDescription(
         [
@@ -38,6 +40,16 @@ def generate_launch_description() -> LaunchDescription:
                 default_value="false",
                 description="Whether MoveIt requests should plan only without execution.",
             ),
+            DeclareLaunchArgument(
+                "move_group_result_timeout",
+                default_value="30.0",
+                description="Seconds to wait for a MoveGroup action result, including execution.",
+            ),
+            DeclareLaunchArgument(
+                "goal_settle_timeout",
+                default_value="5.0",
+                description="Seconds for the local trajectory controller to wait for final joint settle.",
+            ),
             Node(
                 package="motion",
                 executable="planner",
@@ -50,6 +62,7 @@ def generate_launch_description() -> LaunchDescription:
                         "planner_id": planner_id,
                         "target_pose_topic": target_pose_topic,
                         "plan_only": plan_only,
+                        "move_group_result_timeout": move_group_result_timeout,
                     }
                 ],
             ),
@@ -58,6 +71,11 @@ def generate_launch_description() -> LaunchDescription:
                 executable="trajectory_controller",
                 name="right_arm_trajectory_controller",
                 output="screen",
+                parameters=[
+                    {
+                        "goal_settle_timeout": goal_settle_timeout,
+                    }
+                ],
             ),
         ]
     )

@@ -84,6 +84,23 @@ MOVEIT_ERROR_CODE_NAMES = {
     -28: "ABORT",
     -29: "NO_IK_SOLUTION",
 }
+
+RELEASE_TARGET_ON_MOVEIT_ERROR_CODES = {
+    99999,  # Generic planning failure from MoveIt/OMPL.
+    -1,     # PLANNING_FAILED
+    -2,     # INVALID_MOTION_PLAN
+    -3,     # MOTION_PLAN_INVALIDATED_BY_ENVIRONMENT_CHANGE
+    -10,    # START_STATE_IN_COLLISION
+    -11,    # START_STATE_VIOLATES_PATH_CONSTRAINTS
+    -12,    # GOAL_IN_COLLISION
+    -13,    # GOAL_VIOLATES_PATH_CONSTRAINTS
+    -14,    # GOAL_CONSTRAINTS_VIOLATED
+    -16,    # INVALID_GOAL_CONSTRAINTS
+    -21,    # FRAME_TRANSFORM_FAILURE
+    -22,    # COLLISION_CHECKING_UNAVAILABLE
+    -29,    # NO_IK_SOLUTION
+}
+
 class MotionPlannerNode(Node):
     def __init__(self) -> None:
         super().__init__("motion_planner")
@@ -124,6 +141,7 @@ class MotionPlannerNode(Node):
         )
         self.declare_parameter("release_top_down_orientation_weight", 1.0)
         self.declare_parameter("allowed_planning_time", 5.0)
+        self.declare_parameter("move_group_result_timeout", 30.0)
         self.declare_parameter("num_planning_attempts", 5)
         self.declare_parameter("max_velocity_scaling_factor", 0.2)
         self.declare_parameter("max_acceleration_scaling_factor", 0.2)
@@ -210,7 +228,10 @@ class MotionPlannerNode(Node):
         self._allowed_planning_time = float(
             self.get_parameter("allowed_planning_time").value
         )
-        self._move_group_result_timeout = max(self._allowed_planning_time + 5.0, 10.0)
+        self._move_group_result_timeout = max(
+            float(self.get_parameter("move_group_result_timeout").value),
+            self._allowed_planning_time,
+        )
         self._num_planning_attempts = int(
             self.get_parameter("num_planning_attempts").value
         )
@@ -401,6 +422,18 @@ class MotionPlannerNode(Node):
             f"({point.x:.3f}, {point.y:.3f}, {point.z:.3f})."
         )
 
+    def _release_latched_target(self, reason: str) -> None:
+        if self._latched_target_point is None:
+            return
+
+        point = self._latched_target_point.point
+        self._latched_target_point = None
+        self.get_logger().info(
+            f"Released {reason} target at "
+            f"({point.x:.3f}, {point.y:.3f}, {point.z:.3f}); "
+            "waiting to latch the next selected item point."
+        )
+
     def _publish_grasp_debug_poses_in_moveit_frame(self, moveit_point: PointStamped) -> None:
         pregrasp_pose, grasp_pose, retract_pose, drop_pose = self._build_grasp_poses(
             moveit_point,
@@ -511,6 +544,7 @@ class MotionPlannerNode(Node):
         if self._pick_sequence_index >= len(self._pick_sequence):
             self._pick_in_progress = False
             self.get_logger().info("Pick sequence completed.")
+            self._release_latched_target("completed pick")
             return
 
         step = self._pick_sequence[self._pick_sequence_index]
@@ -532,6 +566,7 @@ class MotionPlannerNode(Node):
         if step.pose is None:
             self.get_logger().error(f"Pick step {step.name!r} has no target pose.")
             self._pick_in_progress = False
+            # self._release_latched_target("invalid pick")
             return
 
         if not MOVEIT_ACTIONS_AVAILABLE or self._move_group_client is None:
@@ -539,6 +574,7 @@ class MotionPlannerNode(Node):
                 f"Cannot execute {step.name!r}; MoveGroup action support is unavailable."
             )
             self._pick_in_progress = False
+            # self._release_latched_target("unexecutable pick")
             return
         if self._move_group_goal_may_be_active:
             self.get_logger().error(
@@ -546,6 +582,7 @@ class MotionPlannerNode(Node):
                 "be active inside MoveGroup. Restart move_group before retrying."
             )
             self._pick_in_progress = False
+            # self._release_latched_target("blocked pick")
             return
 
         if not self._move_group_client.server_is_ready():
@@ -553,6 +590,7 @@ class MotionPlannerNode(Node):
             if not self._move_group_client.wait_for_server(timeout_sec=5.0):
                 self.get_logger().error("MoveGroup action server is not available.")
                 self._pick_in_progress = False
+                # self._release_latched_target("unavailable MoveGroup pick")
                 return
 
         self.get_logger().info(
@@ -691,10 +729,12 @@ class MotionPlannerNode(Node):
                     f"MoveGroup goal response failed for pick step {step.name!r}: {error}"
                 )
                 self._pick_in_progress = False
+                # self._release_latched_target("failed MoveGroup goal response")
             return
         if not goal_handle.accepted:
             self.get_logger().error(f"MoveGroup rejected pick step {step.name!r}.")
             self._pick_in_progress = False
+            # self._release_latched_target("rejected MoveGroup goal")
             return
 
         self.get_logger().info(f"MoveGroup accepted pick step {step.name!r}; waiting for result.")
@@ -732,6 +772,7 @@ class MotionPlannerNode(Node):
                 f"MoveGroup result failed for pick step {step.name!r}: {error}"
             )
             self._pick_in_progress = False
+            # self._release_latched_target("failed MoveGroup result")
             return
         action_status = getattr(action_result, "status", None)
         error_code = getattr(getattr(result, "error_code", None), "val", 1)
@@ -757,6 +798,8 @@ class MotionPlannerNode(Node):
                 f"planned_points={planned_points}, executed_points={executed_points}."
             )
             self._pick_in_progress = False
+            if error_code in RELEASE_TARGET_ON_MOVEIT_ERROR_CODES:
+                self._release_latched_target("failed MoveGroup plan")
             return
 
         self.get_logger().info(
@@ -784,6 +827,7 @@ class MotionPlannerNode(Node):
         self._pick_generation += 1
         self._pick_in_progress = False
         self._active_goal_handle = None
+        # self._release_latched_target("timed-out MoveGroup")
         self.get_logger().error(
             f"MoveGroup did not return a result for pick step {step.name!r} within "
             f"{self._move_group_result_timeout:.1f}s. The goal may still be active "

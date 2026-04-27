@@ -22,7 +22,7 @@ class JointCommandTrajectoryController(Node):
         self.declare_parameter("joint_state_topic", "/joint_states")
         self.declare_parameter("status_rate_hz", 60.0)
         self.declare_parameter("goal_tolerance", 0.01)
-        self.declare_parameter("goal_settle_timeout", 2.0)
+        self.declare_parameter("goal_settle_timeout", 5.0)
         self.declare_parameter("joint_limit_margin", 0.0)
 
         action_name = str(self.get_parameter("action_name").value)
