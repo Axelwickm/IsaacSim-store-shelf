@@ -1,3 +1,5 @@
+# THIS IS WIP and not yet fully functioning
+
 # IsaacSim Store Shelf
 
 Minimal ROS 2 Jazzy Python workspace scaffold for the proper Isaac Sim + ROS 2 version of this project.
