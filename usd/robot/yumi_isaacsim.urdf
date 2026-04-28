@@ -639,4 +639,156 @@
       <material name="Blue" />
     </collision>
   </link>
+  <ros2_control name="yumi_topic_ros2_control" type="system">
+    <hardware>
+      <plugin>joint_state_topic_hardware_interface/JointStateTopicSystem</plugin>
+      <param name="joint_states_topic">/isaac_joint_states</param>
+      <param name="joint_commands_topic">/joint_command</param>
+      <param name="trigger_joint_command_threshold">-1.0</param>
+    </hardware>
+    <joint name="yumi_joint_1_l">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="yumi_joint_2_l">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="yumi_joint_7_l">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="yumi_joint_3_l">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="yumi_joint_4_l">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="yumi_joint_5_l">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="yumi_joint_6_l">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="yumi_joint_1_r">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="yumi_joint_2_r">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="yumi_joint_7_r">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="yumi_joint_3_r">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="yumi_joint_4_r">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="yumi_joint_5_r">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="yumi_joint_6_r">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="gripper_l_joint">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+    <joint name="gripper_r_joint">
+      <command_interface name="position" />
+      <command_interface name="velocity" />
+      <state_interface name="position">
+        <param name="initial_value">0.0</param>
+      </state_interface>
+      <state_interface name="velocity" />
+      <state_interface name="effort" />
+    </joint>
+  </ros2_control>
 </robot>

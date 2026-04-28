@@ -2,6 +2,73 @@ FROM nvcr.io/nvidia/isaac-sim:5.1.0
 
 SHELL ["/bin/bash", "-lc"]
 
+USER root
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+    build-essential \
+    ca-certificates \
+    curl \
+    git \
+    gnupg \
+ && rm -rf /var/lib/apt/lists/*
+
+RUN curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key \
+    -o /usr/share/keyrings/ros-archive-keyring.gpg \
+ && . /etc/os-release \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu ${UBUNTU_CODENAME} main" \
+    > /etc/apt/sources.list.d/ros2.list
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+    python3-colcon-common-extensions \
+    ros-jazzy-action-msgs \
+    ros-jazzy-builtin-interfaces \
+    ros-jazzy-diagnostic-msgs \
+    ros-jazzy-geometry-msgs \
+    ros-jazzy-rosidl-default-generators \
+    ros-jazzy-sensor-msgs \
+    ros-jazzy-std-msgs \
+    ros-jazzy-trajectory-msgs \
+ && rm -rf /var/lib/apt/lists/*
+
+# Isaac Sim needs Python 3.11 message/action bindings, but the Jazzy deb
+# generator set also advertises Rust generation. That generator is not needed
+# here and fails under Isaac's Python environment.
+RUN rm -f /opt/ros/jazzy/share/ament_index/resource_index/rosidl_generator_packages/rosidl_generator_rs
+
+WORKDIR /opt/isaac_ros_py311_ws
+
+RUN git clone --depth 1 --branch jazzy \
+    https://github.com/ros-controls/control_msgs.git \
+    src/control_msgs
+
+RUN /isaac-sim/python.sh -m pip install --no-cache-dir --ignore-installed \
+    catkin_pkg \
+    empy \
+    lark \
+    "numpy<2" \
+    packaging \
+    pyparsing \
+    python-dateutil \
+    six
+
+RUN source /opt/ros/jazzy/setup.bash \
+ && export PYTHONPATH="/isaac-sim/exts/isaacsim.ros2.bridge/jazzy/rclpy:${PYTHONPATH:-}" \
+ && export LD_LIBRARY_PATH="/isaac-sim/exts/isaacsim.ros2.bridge/jazzy/lib:${LD_LIBRARY_PATH:-}" \
+ && colcon build \
+      --merge-install \
+      --executor sequential \
+      --parallel-workers 1 \
+      --packages-select control_msgs \
+      --cmake-args \
+        -DPython3_EXECUTABLE=/isaac-sim/kit/python/bin/python3 \
+        -DPYTHON_EXECUTABLE=/isaac-sim/kit/python/bin/python3
+
+USER 1234:1234
+
 WORKDIR /workspace
 
 ENV ISAACSIM_ROOT=/isaac-sim
+ENV ISAAC_ROS_PY311_SITE_PACKAGES=/opt/isaac_ros_py311_ws/install/local/lib/python3.11/dist-packages:/opt/isaac_ros_py311_ws/install/lib/python3.11/site-packages

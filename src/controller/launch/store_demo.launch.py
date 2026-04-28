@@ -57,6 +57,26 @@ def generate_launch_description() -> LaunchDescription:
                     "move_group."
                 ),
             ),
+            DeclareLaunchArgument(
+                "move_group_log_level",
+                default_value="info",
+                description="ROS log level for move_group.",
+            ),
+            DeclareLaunchArgument(
+                "use_moveit_rviz",
+                default_value="false",
+                description="Whether to launch RViz for MoveIt and cuMotion debug markers.",
+            ),
+            DeclareLaunchArgument(
+                "cumotion_robot_xrdf",
+                default_value="/workspace/usd/robot/yumi_isaacsim.xrdf",
+                description="XRDF file for the standalone cuMotion planner node.",
+            ),
+            DeclareLaunchArgument(
+                "cumotion_urdf_path",
+                default_value="/workspace/usd/robot/yumi_isaacsim.urdf",
+                description="URDF file for the standalone cuMotion planner node.",
+            ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(str(sim_launch)),
                 launch_arguments={
@@ -67,6 +87,10 @@ def generate_launch_description() -> LaunchDescription:
                         "controller_spawner_delay"
                     ),
                     "move_group_delay": LaunchConfiguration("move_group_delay"),
+                    "move_group_log_level": LaunchConfiguration("move_group_log_level"),
+                    "use_moveit_rviz": LaunchConfiguration("use_moveit_rviz"),
+                    "cumotion_robot_xrdf": LaunchConfiguration("cumotion_robot_xrdf"),
+                    "cumotion_urdf_path": LaunchConfiguration("cumotion_urdf_path"),
                 }.items(),
             ),
             IncludeLaunchDescription(
@@ -86,6 +110,8 @@ def generate_launch_description() -> LaunchDescription:
                 launch_arguments={
                     "pipeline_id": LaunchConfiguration("motion_pipeline_id"),
                     "planner_id": LaunchConfiguration("motion_planner_id"),
+                    "cumotion_robot_xrdf": LaunchConfiguration("cumotion_robot_xrdf"),
+                    "cumotion_urdf_path": LaunchConfiguration("cumotion_urdf_path"),
                 }.items(),
             ),
         ]

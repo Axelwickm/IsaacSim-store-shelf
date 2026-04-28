@@ -19,6 +19,7 @@ setup(
         (f"share/{package_name}", ["package.xml"]),
         (f"share/{package_name}/config", data_glob("config/*")),
         (f"share/{package_name}/launch", data_glob("launch/*")),
+        (f"share/{package_name}/rviz", data_glob("rviz/*")),
     ],
     install_requires=["setuptools"],
     zip_safe=True,

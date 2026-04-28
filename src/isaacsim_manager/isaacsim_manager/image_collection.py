@@ -29,7 +29,6 @@ from .target_marker_visualizer import (
     DEFAULT_MARKER_RADIUS_METERS,
     IsaacSimTargetMarkerVisualizer,
 )
-from .trajectory_executor import IsaacSimTrajectoryExecutor
 
 
 DEFAULT_REPLICATOR_OUTPUT_DIR = "/workspace/collect_vision_data_output"
@@ -289,6 +288,8 @@ def _update_collection_flow(flow_state: dict) -> None:
 
 
 def _update_store_demo_flow(flow_state: dict) -> None:
+    global _trajectory_executor
+
     if _timeline_autoplay_enabled and not _timeline_is_playing():
         return
 
@@ -308,6 +309,13 @@ def _update_store_demo_flow(flow_state: dict) -> None:
     flow_state["reset_time_remaining"] -= SIMULATION_STEP_SECONDS
     if flow_state["reset_time_remaining"] > 0.0:
         return
+    if (
+        _trajectory_executor is not None
+        and _trajectory_executor.has_active_trajectory()
+    ):
+        flow_state["reset_time_remaining"] = 1.0
+        return
+    print("[store_shelf] Store demo timed reset firing", flush=True)
     _reset_store_demo_flow(flow_state)
     flow_state["reset_time_remaining"] = flow_state["reset_interval_seconds"]
 
@@ -491,6 +499,8 @@ def _setup_store_shelf_scene(
     if configuration == "store_demo":
         if not rclpy.ok():
             rclpy.init(args=None)
+        from .trajectory_executor import IsaacSimTrajectoryExecutor
+
         _trajectory_executor = IsaacSimTrajectoryExecutor(
             articulation_root_path=scene["ros2_joint_bridge"]["articulation_root_path"],
         )

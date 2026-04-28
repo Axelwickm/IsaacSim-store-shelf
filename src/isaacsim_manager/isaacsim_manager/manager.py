@@ -272,6 +272,11 @@ def _run_simulation_app(mode: str, configuration: str | None) -> None:
     if configuration not in CONFIGURATION_FUNCTIONS:
         raise RuntimeError(f"Unsupported simulation configuration: {configuration!r}")
 
+    print(
+        "[isaacsim_manager] Runner code version: lifecycle-diagnostics-v2",
+        flush=True,
+    )
+
     from isaacsim import SimulationApp
 
     enable_ros2_bridge = (
@@ -318,8 +323,31 @@ def _run_simulation_app(mode: str, configuration: str | None) -> None:
                 flush=True,
             )
             raise
-        while simulation_app.is_running():
-            update_simulation_app(simulation_app)
+        try:
+            while simulation_app.is_running():
+                update_simulation_app(simulation_app)
+        except BaseException as exc:
+            print(
+                "[isaacsim_manager] Simulation update loop exited via "
+                f"{type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            raise
+        try:
+            import omni.timeline
+
+            timeline = omni.timeline.get_timeline_interface()
+            print(
+                "[isaacsim_manager] SimulationApp.is_running() became false "
+                f"(timeline_playing={timeline.is_playing()})",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                "[isaacsim_manager] SimulationApp.is_running() became false "
+                f"(timeline state unavailable: {exc})",
+                flush=True,
+            )
     finally:
         if rclpy.ok():
             rclpy.shutdown()

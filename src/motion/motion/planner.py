@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 
+import json
+import time
 from copy import deepcopy
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import rclpy
@@ -112,6 +115,15 @@ JOINT_POSITION_LIMITS = {
     "yumi_joint_5_r": (-1.52, 2.36),
     "yumi_joint_6_r": (-3.95, 3.95),
 }
+RIGHT_ARM_JOINT_ORDER = (
+    "yumi_joint_1_r",
+    "yumi_joint_2_r",
+    "yumi_joint_7_r",
+    "yumi_joint_3_r",
+    "yumi_joint_4_r",
+    "yumi_joint_5_r",
+    "yumi_joint_6_r",
+)
 
 
 class MotionPlannerNode(Node):
@@ -155,9 +167,11 @@ class MotionPlannerNode(Node):
         self.declare_parameter("release_top_down_orientation_weight", 0.5)
         self.declare_parameter("allowed_planning_time", 5.0)
         self.declare_parameter("move_group_result_timeout", 30.0)
+        self.declare_parameter("move_group_observability_interval", 5.0)
+        self.declare_parameter("move_group_debug_dump_dir", "/tmp/motion_planner_debug")
         self.declare_parameter("num_planning_attempts", 5)
-        self.declare_parameter("max_velocity_scaling_factor", 0.08)
-        self.declare_parameter("max_acceleration_scaling_factor", 0.08)
+        self.declare_parameter("max_velocity_scaling_factor", 0.2)
+        self.declare_parameter("max_acceleration_scaling_factor", 0.2)
 
         self._validate_external_dependencies()
 
@@ -205,9 +219,16 @@ class MotionPlannerNode(Node):
         self._pick_sequence: list[MotionStep] = []
         self._pick_sequence_index = 0
         self._pick_generation = 0
+        self._move_request_serial = 0
         self._step_timer: Any | None = None
         self._move_result_timer: Any | None = None
+        self._move_observability_timer: Any | None = None
         self._active_goal_handle: Any | None = None
+        self._active_move_step_name = ""
+        self._active_move_request_id = ""
+        self._active_move_request_summary = ""
+        self._active_move_request_profile: dict[str, Any] = {}
+        self._active_move_started_monotonic = 0.0
         self._move_group_goal_may_be_active = False
         self._pipeline_id = pipeline_id
         self._planner_id = planner_id
@@ -245,6 +266,14 @@ class MotionPlannerNode(Node):
             float(self.get_parameter("move_group_result_timeout").value),
             self._allowed_planning_time,
         )
+        self._move_group_observability_interval = max(
+            float(self.get_parameter("move_group_observability_interval").value),
+            0.0,
+        )
+        self._move_group_debug_dump_dir = Path(
+            str(self.get_parameter("move_group_debug_dump_dir").value)
+        )
+        self._move_group_debug_dump_dir.mkdir(parents=True, exist_ok=True)
         self._num_planning_attempts = int(
             self.get_parameter("num_planning_attempts").value
         )
@@ -333,6 +362,10 @@ class MotionPlannerNode(Node):
             f"planning points on {selected_item_moveit_point_topic}; "
             f"first world point is latched and republished on {latched_target_point_topic}. "
             f"Publish std_msgs/Empty on {clear_latched_target_topic} to latch a new point."
+        )
+        self.get_logger().info(
+            f"MoveGroup debug artifacts will be written under "
+            f"{self._move_group_debug_dump_dir}"
         )
         if not MOVEIT_ACTIONS_AVAILABLE:
             self.get_logger().warning(
@@ -545,12 +578,20 @@ class MotionPlannerNode(Node):
         if self._move_result_timer is not None:
             self._move_result_timer.cancel()
             self._move_result_timer = None
+        if self._move_observability_timer is not None:
+            self._move_observability_timer.cancel()
+            self._move_observability_timer = None
         if self._active_goal_handle is not None:
             self.get_logger().info(
                 f"Stopped local pick sequence after {reason}; not canceling active "
                 "MoveGroup goal because MoveGroup can crash on preempt in this setup."
             )
             self._active_goal_handle = None
+        self._active_move_step_name = ""
+        self._active_move_request_id = ""
+        self._active_move_request_summary = ""
+        self._active_move_request_profile = {}
+        self._active_move_started_monotonic = 0.0
 
     def _execute_next_pick_step(self) -> None:
         if self._pick_sequence_index >= len(self._pick_sequence):
@@ -606,21 +647,32 @@ class MotionPlannerNode(Node):
                 self._retry_current_pick_step()
                 return
 
+        goal = self._build_move_group_goal(step)
+        request_id, request_profile = self._build_move_group_observability(step, goal)
+        request_summary = request_profile["summary"]
+        self._write_move_group_debug_artifact(
+            request_id,
+            "sent",
+            {
+                "step_name": step.name,
+                "profile": request_profile,
+            },
+        )
         self.get_logger().info(
-            f"Sending MoveGroup {'plan' if self._plan_only else 'goal'} for {step.name!r} at "
-            f"({step.pose.pose.position.x:.3f}, "
-            f"{step.pose.pose.position.y:.3f}, "
-            f"{step.pose.pose.position.z:.3f}) in {step.pose.header.frame_id!r}."
+            f"Sending MoveGroup {'plan' if self._plan_only else 'goal'} "
+            f"request_id={request_id} for {step.name!r}: "
+            f"{request_summary}"
         )
         generation = self._pick_generation
-        send_future = self._move_group_client.send_goal_async(
-            self._build_move_group_goal(step)
-        )
+        send_future = self._move_group_client.send_goal_async(goal)
         send_future.add_done_callback(
-            lambda future, current_step=step, current_generation=generation: self._handle_move_goal_response(
+            lambda future, current_step=step, current_generation=generation, current_request_id=request_id, current_request_summary=request_summary, current_request_profile=request_profile: self._handle_move_goal_response(
                 future,
                 current_step,
                 current_generation,
+                current_request_id,
+                current_request_summary,
+                current_request_profile,
             )
         )
 
@@ -753,6 +805,9 @@ class MotionPlannerNode(Node):
         future: Any,
         step: MotionStep,
         generation: int,
+        request_id: str,
+        request_summary: str,
+        request_profile: dict[str, Any],
     ) -> None:
         if generation != self._pick_generation:
             return
@@ -763,18 +818,51 @@ class MotionPlannerNode(Node):
                 self.get_logger().error(
                     f"MoveGroup goal response failed for pick step {step.name!r}: {error}"
                 )
+                self._write_move_group_debug_artifact(
+                    request_id,
+                    "goal_response_error",
+                    {
+                        "step_name": step.name,
+                        "error": str(error),
+                        "profile": request_profile,
+                    },
+                )
                 self._pick_in_progress = False
                 # self._release_latched_target("failed MoveGroup goal response")
             return
         if not goal_handle.accepted:
             self.get_logger().error(f"MoveGroup rejected pick step {step.name!r}.")
+            self._write_move_group_debug_artifact(
+                request_id,
+                "rejected",
+                {
+                    "step_name": step.name,
+                    "profile": request_profile,
+                },
+            )
             self._pick_in_progress = False
             # self._release_latched_target("rejected MoveGroup goal")
             return
 
-        self.get_logger().info(f"MoveGroup accepted pick step {step.name!r}; waiting for result.")
+        self.get_logger().info(
+            f"MoveGroup accepted request_id={request_id} pick step {step.name!r}; waiting for result. "
+            f"Request: {request_summary}"
+        )
         self._active_goal_handle = goal_handle
+        self._active_move_step_name = step.name
+        self._active_move_request_id = request_id
+        self._active_move_request_summary = request_summary
+        self._active_move_request_profile = request_profile
+        self._active_move_started_monotonic = time.monotonic()
         self._move_group_goal_may_be_active = True
+        self._write_move_group_debug_artifact(
+            request_id,
+            "accepted",
+            {
+                "step_name": step.name,
+                "profile": request_profile,
+            },
+        )
         self._move_result_timer = self.create_timer(
             self._move_group_result_timeout,
             lambda current_step=step, current_generation=generation: self._handle_move_result_timeout(
@@ -782,6 +870,14 @@ class MotionPlannerNode(Node):
                 current_generation,
             ),
         )
+        if (
+            self._move_group_observability_interval > 0.0
+            and self._move_group_observability_interval < self._move_group_result_timeout
+        ):
+            self._move_observability_timer = self.create_timer(
+                self._move_group_observability_interval,
+                self._log_active_move_wait,
+            )
         result_future = goal_handle.get_result_async()
         result_future.add_done_callback(
             lambda result, current_step=step, current_generation=generation: self._handle_move_result(
@@ -796,6 +892,9 @@ class MotionPlannerNode(Node):
         if self._move_result_timer is not None:
             self._move_result_timer.cancel()
             self._move_result_timer = None
+        if self._move_observability_timer is not None:
+            self._move_observability_timer.cancel()
+            self._move_observability_timer = None
         if generation != self._pick_generation:
             return
         self._active_goal_handle = None
@@ -805,6 +904,15 @@ class MotionPlannerNode(Node):
         except Exception as error:
             self.get_logger().error(
                 f"MoveGroup result failed for pick step {step.name!r}: {error}"
+            )
+            self._write_move_group_debug_artifact(
+                self._active_move_request_id,
+                "result_error",
+                {
+                    "step_name": step.name,
+                    "error": str(error),
+                    "profile": self._active_move_request_profile,
+                },
             )
             self._pick_in_progress = False
             # self._release_latched_target("failed MoveGroup result")
@@ -830,9 +938,28 @@ class MotionPlannerNode(Node):
                 f"MoveGroup failed pick step {step.name!r}: "
                 f"error={error_name} ({error_code}), action_status={action_status}, "
                 f"planning_time={planning_time:.3f}s, "
-                f"planned_points={planned_points}, executed_points={executed_points}."
+                f"planned_points={planned_points}, executed_points={executed_points}, "
+                f"request_id={self._active_move_request_id}. "
+                f"Request: {self._active_move_request_summary}"
+            )
+            self._write_move_group_debug_artifact(
+                self._active_move_request_id,
+                "failed",
+                {
+                    "step_name": step.name,
+                    "error_name": error_name,
+                    "error_code": error_code,
+                    "action_status": action_status,
+                    "planning_time": planning_time,
+                    "planned_points": planned_points,
+                    "executed_points": executed_points,
+                    "planned_final": planned_final,
+                    "executed_final": executed_final,
+                    "profile": self._active_move_request_profile,
+                },
             )
             self._pick_in_progress = False
+            self._clear_active_move_observability()
             if error_code in RELEASE_TARGET_ON_MOVEIT_ERROR_CODES:
                 self._release_latched_target("failed MoveGroup plan")
             return
@@ -841,7 +968,8 @@ class MotionPlannerNode(Node):
             f"MoveGroup completed pick step {step.name!r}: "
             f"error={error_name} ({error_code}), action_status={action_status}, "
             f"planning_time={planning_time:.3f}s, "
-            f"planned_points={planned_points}, executed_points={executed_points}."
+            f"planned_points={planned_points}, executed_points={executed_points}, "
+            f"request_id={self._active_move_request_id}."
         )
         if planned_final:
             self.get_logger().info(
@@ -851,24 +979,242 @@ class MotionPlannerNode(Node):
             self.get_logger().info(
                 f"MoveGroup executed final joints for {step.name!r}: {executed_final}"
             )
+        self._write_move_group_debug_artifact(
+            self._active_move_request_id,
+            "succeeded",
+            {
+                "step_name": step.name,
+                "error_name": error_name,
+                "error_code": error_code,
+                "action_status": action_status,
+                "planning_time": planning_time,
+                "planned_points": planned_points,
+                "executed_points": executed_points,
+                "planned_final": planned_final,
+                "executed_final": executed_final,
+                "profile": self._active_move_request_profile,
+            },
+        )
+        self._clear_active_move_observability()
         self._execute_next_pick_step()
 
     def _handle_move_result_timeout(self, step: MotionStep, generation: int) -> None:
         if self._move_result_timer is not None:
             self._move_result_timer.cancel()
             self._move_result_timer = None
+        if self._move_observability_timer is not None:
+            self._move_observability_timer.cancel()
+            self._move_observability_timer = None
         if generation != self._pick_generation:
             return
+        elapsed = (
+            time.monotonic() - self._active_move_started_monotonic
+            if self._active_move_started_monotonic > 0.0
+            else self._move_group_result_timeout
+        )
         self._pick_generation += 1
         self._pick_in_progress = False
         self._active_goal_handle = None
         # self._release_latched_target("timed-out MoveGroup")
         self.get_logger().error(
             f"MoveGroup did not return a result for pick step {step.name!r} within "
-            f"{self._move_group_result_timeout:.1f}s. The goal may still be active "
+            f"{self._move_group_result_timeout:.1f}s "
+            f"(elapsed={elapsed:.1f}s). The goal may still be active "
             "inside MoveGroup; not canceling it because preempt can crash this setup. "
-            "Restart move_group before retrying."
+            f"Restart move_group before retrying. request_id={self._active_move_request_id}. "
+            f"Request: {self._active_move_request_summary}"
         )
+        self._write_move_group_debug_artifact(
+            self._active_move_request_id,
+            "timeout",
+            {
+                "step_name": step.name,
+                "elapsed": elapsed,
+                "timeout_seconds": self._move_group_result_timeout,
+                "profile": self._active_move_request_profile,
+            },
+        )
+        self._clear_active_move_observability()
+
+    def _log_active_move_wait(self) -> None:
+        if not self._move_group_goal_may_be_active or not self._active_move_step_name:
+            return
+        elapsed = time.monotonic() - self._active_move_started_monotonic
+        self.get_logger().warning(
+            f"Still waiting on MoveGroup result for request_id={self._active_move_request_id} "
+            f"pick step {self._active_move_step_name!r} after {elapsed:.1f}s. "
+            f"Request: {self._active_move_request_summary}"
+        )
+        self._write_move_group_debug_artifact(
+            self._active_move_request_id,
+            "waiting",
+            {
+                "step_name": self._active_move_step_name,
+                "elapsed": elapsed,
+                "profile": self._active_move_request_profile,
+            },
+        )
+
+    def _clear_active_move_observability(self) -> None:
+        self._active_move_step_name = ""
+        self._active_move_request_id = ""
+        self._active_move_request_summary = ""
+        self._active_move_request_profile = {}
+        self._active_move_started_monotonic = 0.0
+
+    def _build_move_group_observability(
+        self,
+        step: MotionStep,
+        goal: Any,
+    ) -> tuple[str, dict[str, Any]]:
+        request = goal.request
+        pose = step.pose.pose if step.pose is not None else None
+        self._move_request_serial += 1
+        request_id = f"move-{self._move_request_serial:05d}"
+        pose_data: dict[str, Any] = {}
+        if pose is not None:
+            pose_data = {
+                "frame": step.pose.header.frame_id,
+                "position_xyz": [
+                    float(pose.position.x),
+                    float(pose.position.y),
+                    float(pose.position.z),
+                ],
+                "orientation_xyzw": [
+                    float(pose.orientation.x),
+                    float(pose.orientation.y),
+                    float(pose.orientation.z),
+                    float(pose.orientation.w),
+                ],
+                "position_norm": (
+                    pose.position.x ** 2 + pose.position.y ** 2 + pose.position.z ** 2
+                ) ** 0.5,
+            }
+        start_state_summary = self._joint_state_summary(
+            request.start_state.joint_state,
+            RIGHT_ARM_JOINT_ORDER,
+        )
+        orientation_data: dict[str, Any] = {"enabled": False}
+        if request.goal_constraints:
+            orientation_constraints = getattr(
+                request.goal_constraints[0],
+                "orientation_constraints",
+                [],
+            )
+            if orientation_constraints:
+                constraint = orientation_constraints[0]
+                orientation_data = {
+                    "enabled": True,
+                    "orientation_xyzw": [
+                        float(constraint.orientation.x),
+                        float(constraint.orientation.y),
+                        float(constraint.orientation.z),
+                        float(constraint.orientation.w),
+                    ],
+                    "tolerance_xyz": [
+                        float(constraint.absolute_x_axis_tolerance),
+                        float(constraint.absolute_y_axis_tolerance),
+                        float(constraint.absolute_z_axis_tolerance),
+                    ],
+                    "weight": float(constraint.weight),
+                }
+        pose_position = pose_data.get("position_xyz", [0.0, 0.0, 0.0])
+        pose_orientation = pose_data.get("orientation_xyzw", [0.0, 0.0, 0.0, 1.0])
+        summary = (
+            f"pipeline={request.pipeline_id} planner={request.planner_id} "
+            f"group={request.group_name} attempts={request.num_planning_attempts} "
+            f"allowed_planning_time={request.allowed_planning_time:.2f}s "
+            f"vel_scale={request.max_velocity_scaling_factor:.3f} "
+            f"acc_scale={request.max_acceleration_scaling_factor:.3f} "
+            f"position_tolerance={self._position_tolerance:.3f} "
+            f"target=({pose_position[0]:.3f}, {pose_position[1]:.3f}, {pose_position[2]:.3f}) "
+            f"quat=({pose_orientation[0]:.3f}, {pose_orientation[1]:.3f}, "
+            f"{pose_orientation[2]:.3f}, {pose_orientation[3]:.3f}) "
+            f"frame={pose_data.get('frame', '?')}; "
+            f"orientation_constraint={'on' if orientation_data['enabled'] else 'off'}; "
+            f"start_state={start_state_summary}"
+        )
+        profile = {
+            "request_id": request_id,
+            "step_name": step.name,
+            "timestamp_ns": int(self.get_clock().now().nanoseconds),
+            "pipeline_id": request.pipeline_id,
+            "planner_id": request.planner_id,
+            "group_name": request.group_name,
+            "num_planning_attempts": int(request.num_planning_attempts),
+            "allowed_planning_time": float(request.allowed_planning_time),
+            "max_velocity_scaling_factor": float(request.max_velocity_scaling_factor),
+            "max_acceleration_scaling_factor": float(
+                request.max_acceleration_scaling_factor
+            ),
+            "position_tolerance": float(self._position_tolerance),
+            "force_top_down": bool(step.force_top_down),
+            "pose": pose_data,
+            "orientation_constraint": orientation_data,
+            "start_state": self._joint_state_dict(
+                request.start_state.joint_state,
+                RIGHT_ARM_JOINT_ORDER,
+            ),
+            "summary": summary,
+        }
+        return request_id, profile
+
+    def _joint_state_summary(
+        self,
+        joint_state: JointState,
+        joint_names: tuple[str, ...],
+    ) -> str:
+        positions_by_name = {
+            joint_name: joint_state.position[index]
+            for index, joint_name in enumerate(joint_state.name)
+            if index < len(joint_state.position)
+        }
+        return ", ".join(
+            f"{joint_name}={positions_by_name[joint_name]:.4f}"
+            for joint_name in joint_names
+            if joint_name in positions_by_name
+        )
+
+    def _joint_state_dict(
+        self,
+        joint_state: JointState,
+        joint_names: tuple[str, ...],
+    ) -> dict[str, float]:
+        positions_by_name = {
+            joint_name: joint_state.position[index]
+            for index, joint_name in enumerate(joint_state.name)
+            if index < len(joint_state.position)
+        }
+        return {
+            joint_name: float(positions_by_name[joint_name])
+            for joint_name in joint_names
+            if joint_name in positions_by_name
+        }
+
+    def _write_move_group_debug_artifact(
+        self,
+        request_id: str,
+        phase: str,
+        payload: dict[str, Any],
+    ) -> None:
+        if not request_id:
+            return
+        artifact_path = self._move_group_debug_dump_dir / f"{request_id}_{phase}.json"
+        document = {
+            "request_id": request_id,
+            "phase": phase,
+            "wall_time_monotonic": time.monotonic(),
+            "payload": payload,
+        }
+        try:
+            artifact_path.write_text(
+                json.dumps(document, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+        except OSError as error:
+            self.get_logger().warning(
+                f"Failed to write MoveGroup debug artifact {artifact_path}: {error}"
+            )
 
     def _trajectory_point_count(self, trajectory: Any | None) -> int:
         if trajectory is None:

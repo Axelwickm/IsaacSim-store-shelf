@@ -3,33 +3,15 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.ros2
-    image: isaacsim-store-shelf:ros2
-    network_mode: host
-    ipc: host
-    environment:
-      FASTDDS_BUILTIN_TRANSPORTS: UDPv4
-      RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
-      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-0}
-      ROS_LOCALHOST_ONLY: ${ROS_LOCALHOST_ONLY:-0}
-      DISPLAY: ${DISPLAY:-:0}
-      XAUTHORITY: /root/.Xauthority
-      QT_X11_NO_MITSHM: "1"
-    working_dir: /workspace
-    stdin_open: true
-    tty: true
-    volumes:
-      - ./:/workspace
-      - ${HOME}/.Xauthority:/root/.Xauthority:ro
-      - /tmp/.X11-unix:/tmp/.X11-unix:rw
-
-  ros2-gpu:
-    build:
-      context: .
-      dockerfile: Dockerfile.ros2
+      args:
+        COLCON_PACKAGE_WORKERS: ${COLCON_PACKAGE_WORKERS:-1}
+        COLCON_COMPILE_JOBS: ${COLCON_COMPILE_JOBS:-2}
     image: isaacsim-store-shelf:ros2
     network_mode: host
     ipc: host
     gpus: all
+    devices:
+      - /dev/dri:/dev/dri
     environment:
       FASTDDS_BUILTIN_TRANSPORTS: UDPv4
       RMW_IMPLEMENTATION: ${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}
@@ -37,6 +19,8 @@ services:
       ROS_LOCALHOST_ONLY: ${ROS_LOCALHOST_ONLY:-0}
       NVIDIA_DRIVER_CAPABILITIES: all
       NVIDIA_VISIBLE_DEVICES: all
+      __NV_PRIME_RENDER_OFFLOAD: "1"
+      __VK_LAYER_NV_optimus: NVIDIA_only
       DISPLAY: ${DISPLAY:-:0}
       XAUTHORITY: /root/.Xauthority
       QT_X11_NO_MITSHM: "1"
@@ -84,11 +68,12 @@ services:
       - -lc
     command:
       - |
+        source /opt/ros/jazzy/setup.bash
         export ROS_DISTRO=jazzy
         export RMW_IMPLEMENTATION="$${RMW_IMPLEMENTATION:-rmw_fastrtps_cpp}"
         export COLCON_PYTHON_EXECUTABLE=/isaac-sim/kit/python/bin/python3
-        export PYTHONPATH="/workspace/src/isaacsim_manager:/isaac-sim/exts/isaacsim.ros2.bridge/jazzy/rclpy:$${PYTHONPATH:-}"
-        export LD_LIBRARY_PATH="/isaac-sim/exts/isaacsim.ros2.bridge/jazzy/lib:$${LD_LIBRARY_PATH:-}"
+        export PYTHONPATH="/opt/isaac_ros_py311_ws/install/local/lib/python3.11/dist-packages:/opt/isaac_ros_py311_ws/install/lib/python3.11/site-packages:/workspace/src/isaacsim_manager:/isaac-sim/exts/isaacsim.ros2.bridge/jazzy/rclpy:$${PYTHONPATH:-}"
+        export LD_LIBRARY_PATH="/opt/isaac_ros_py311_ws/install/lib:/isaac-sim/exts/isaacsim.ros2.bridge/jazzy/lib:$${LD_LIBRARY_PATH:-}"
         echo "Starting Isaac Sim manager from /workspace/src/isaacsim_manager"
         exec /isaac-sim/python.sh -m isaacsim_manager.manager
     volumes:

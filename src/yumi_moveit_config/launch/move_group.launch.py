@@ -2,10 +2,17 @@ from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, RegisterEventHandler, TimerAction
+from launch.actions import (
+    DeclareLaunchArgument,
+    IncludeLaunchDescription,
+    LogInfo,
+    RegisterEventHandler,
+    TimerAction,
+)
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
-from launch.substitutions import LaunchConfiguration
+from launch.launch_description_sources import PythonLaunchDescriptionSource
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from moveit_configs_utils import MoveItConfigsBuilder
 
@@ -42,12 +49,23 @@ def controller_spawner(controller_name: str) -> Node:
     )
 
 
+def _cumotion_launch_path() -> str:
+    return str(
+        Path(get_package_share_directory("isaac_ros_cumotion"))
+        / "launch"
+        / "isaac_ros_cumotion.launch.py"
+    )
+
+
 def generate_launch_description() -> LaunchDescription:
     planning_pipeline = LaunchConfiguration("planning_pipeline")
     use_rviz = LaunchConfiguration("use_rviz")
     use_sim_time = LaunchConfiguration("use_sim_time")
     controller_spawner_delay = LaunchConfiguration("controller_spawner_delay")
     move_group_delay = LaunchConfiguration("move_group_delay")
+    move_group_log_level = LaunchConfiguration("move_group_log_level")
+    cumotion_robot_xrdf = LaunchConfiguration("cumotion_robot_xrdf")
+    cumotion_urdf_path = LaunchConfiguration("cumotion_urdf_path")
 
     moveit_config = (
         MoveItConfigsBuilder("yumi", package_name="yumi_moveit_config")
@@ -89,6 +107,11 @@ def generate_launch_description() -> LaunchDescription:
         / "config"
         / "ros2_controllers.yaml"
     )
+    rviz_config_path = str(
+        Path(get_package_share_directory("yumi_moveit_config"))
+        / "rviz"
+        / "cumotion_debug.rviz"
+    )
     planning_scene_monitor_parameters = {
         "publish_planning_scene": False,
         "publish_geometry_updates": False,
@@ -104,6 +127,7 @@ def generate_launch_description() -> LaunchDescription:
         package="moveit_ros_move_group",
         executable="move_group",
         output="screen",
+        arguments=["--ros-args", "--log-level", move_group_log_level],
         parameters=[
             moveit_config.to_dict(),
             {"default_planning_pipeline": planning_pipeline},
@@ -113,6 +137,36 @@ def generate_launch_description() -> LaunchDescription:
             start_state_bounds_parameters,
             {"use_sim_time": use_sim_time},
         ],
+    )
+    cumotion_ready = PythonExpression(
+        [
+            "'",
+            planning_pipeline,
+            "' == 'isaac_ros_cumotion' and '",
+            cumotion_robot_xrdf,
+            "' != '' and '",
+            cumotion_urdf_path,
+            "' != ''",
+        ]
+    )
+    cumotion_missing_robot_description = PythonExpression(
+        [
+            "'",
+            planning_pipeline,
+            "' == 'isaac_ros_cumotion' and ('",
+            cumotion_robot_xrdf,
+            "' == '' or '",
+            cumotion_urdf_path,
+            "' == '')",
+        ]
+    )
+    cumotion_planner_launch = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(_cumotion_launch_path()),
+        condition=IfCondition(cumotion_ready),
+        launch_arguments={
+            "cumotion_planner.robot": cumotion_robot_xrdf,
+            "cumotion_planner.urdf_path": cumotion_urdf_path,
+        }.items(),
     )
 
     ros2_control_node = Node(
@@ -140,6 +194,7 @@ def generate_launch_description() -> LaunchDescription:
         package="rviz2",
         executable="rviz2",
         output="screen",
+        arguments=["-d", rviz_config_path],
         parameters=[
             moveit_config.robot_description,
             moveit_config.robot_description_semantic,
@@ -177,12 +232,53 @@ def generate_launch_description() -> LaunchDescription:
                 "move_group controller discovery."
             ),
         ),
+        DeclareLaunchArgument(
+            "move_group_log_level",
+            default_value="info",
+            description=(
+                "ROS log level for move_group. Use 'debug' to inspect cuMotion plugin "
+                "activity inside the MoveIt process."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "cumotion_robot_xrdf",
+            default_value="/workspace/usd/robot/yumi_isaacsim.xrdf",
+            description=(
+                "XRDF file passed to the standalone cuMotion planner node when the "
+                "isaac_ros_cumotion pipeline is selected."
+            ),
+        ),
+        DeclareLaunchArgument(
+            "cumotion_urdf_path",
+            default_value="/workspace/usd/robot/yumi_isaacsim.urdf",
+            description=(
+                "URDF file passed to the standalone cuMotion planner node when the "
+                "isaac_ros_cumotion pipeline is selected."
+            ),
+        ),
         robot_state_publisher_node,
         ros2_control_node,
         TimerAction(
             period=controller_spawner_delay,
             actions=[joint_state_broadcaster_spawner],
         ),
+        LogInfo(
+            condition=IfCondition(cumotion_ready),
+            msg=[
+                "Launching standalone cuMotion planner node with XRDF=",
+                cumotion_robot_xrdf,
+                " URDF=",
+                cumotion_urdf_path,
+            ],
+        ),
+        LogInfo(
+            condition=IfCondition(cumotion_missing_robot_description),
+            msg=(
+                "cuMotion pipeline selected but standalone planner node was not launched "
+                "because cumotion_robot_xrdf or cumotion_urdf_path is empty."
+            ),
+        ),
+        cumotion_planner_launch,
         RegisterEventHandler(
             OnProcessExit(
                 target_action=joint_state_broadcaster_spawner,

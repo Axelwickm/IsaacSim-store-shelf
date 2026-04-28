@@ -19,10 +19,11 @@ NOTE: Only Nvidia GPU supported
 ## Run
 
 ```bash
-docker compose up --build
+COMPOSE_PARALLEL_LIMIT=1 docker compose build ros2 isaacsim
+docker compose up ros2 isaacsim
 ```
 
-The container will:
+The ROS container will:
 
 1. Source ROS 2 Jazzy
 2. Build the workspace with `colcon`
@@ -36,7 +37,8 @@ Pass simulation launch options as ROS launch arguments:
 docker compose run --rm ros2 bash -lc "source /opt/ros/jazzy/setup.bash && colcon build --symlink-install && source install/setup.bash && ros2 launch controller sim.launch.py headless:=true scene:=store_shelf.usd"
 ```
 
-The default `ros2` compose service does not request a GPU. Use it for normal shell access, builds, and CPU-only ROS 2 work when the host NVIDIA runtime is unavailable. Use `ros2-gpu` only for commands that need CUDA on a host with a working NVIDIA driver stack.
+The `ros2` compose service is GPU-enabled. cuMotion and CUDA vision inference
+need the host NVIDIA runtime to be available inside the container.
 
 ## Motion Planning
 
@@ -52,13 +54,87 @@ The image installs:
 
 The image also clones and builds `isaac_ros_cumotion` from source in `/opt/isaac_ros_cumotion_ws`, because the matching Jazzy Debian package is not currently available from NVIDIA's apt repository for this base image.
 
-For GPU-backed motion planning tools, use the GPU-enabled ROS 2 service explicitly:
+For shell access to the GPU-enabled ROS 2 service:
 
 ```bash
-docker compose run --rm ros2-gpu bash
+docker compose run --rm ros2 bash
 ```
 
 The `motion` node currently validates that MoveIt and cuMotion are present in the environment, then listens for `geometry_msgs/msg/PoseStamped` goals on `/motion/target_pose`. It is the package where the vision-to-planning bridge and MoveIt request wiring should live next.
+
+## Store Demo With cuMotion
+
+Build the ROS workspace inside the running `ros2` container after code changes:
+
+```bash
+colcon build --symlink-install
+source install/setup.bash
+```
+
+Start the full store demo with cuMotion:
+
+```bash
+ros2 launch controller store_demo.launch.py \
+  motion_pipeline_id:=isaac_ros_cumotion \
+  motion_planner_id:=cuMotion
+```
+
+This launches:
+
+- Isaac Sim manager control node
+- robot state publisher
+- ros2_control topic hardware and joint state broadcaster
+- NVIDIA cuMotion planner launch
+- MoveGroup using the `isaac_ros_cumotion` planning pipeline
+- vision inference
+- motion planner
+- Isaac Sim direct `FollowJointTrajectory` executor
+
+The YuMi cuMotion robot model is:
+
+```text
+/workspace/usd/robot/yumi_isaacsim.urdf
+/workspace/usd/robot/yumi_isaacsim.xrdf
+```
+
+If cuMotion reports `INVALID_START_STATE_SELF_COLLISION`, inspect the cuMotion
+sphere approximation before changing ignore pairs or sphere radii.
+
+## cuMotion Sphere Visualization
+
+Launch the store demo with RViz enabled:
+
+```bash
+ros2 launch controller store_demo.launch.py \
+  motion_pipeline_id:=isaac_ros_cumotion \
+  motion_planner_id:=cuMotion \
+  use_moveit_rviz:=true
+```
+
+RViz opens with `src/yumi_moveit_config/rviz/cumotion_debug.rviz`, which shows:
+
+- YuMi robot model
+- `/cumotion/robot_spheres`
+- `/viz_all_spheres/planner_attach_object`
+- `/curobo/voxels`
+
+The `/cumotion/robot_spheres` topic is published by:
+
+```text
+motion/cumotion_sphere_publisher
+```
+
+It loads the same XRDF/URDF as cuMotion, evaluates cuRobo link spheres at the
+current `/joint_states`, and publishes a `visualization_msgs/MarkerArray` in
+the `yumi_body` frame. Use this to compare cuMotion's robot collision model
+against the visible robot before editing the XRDF.
+
+If RViz is already running and no spheres appear, verify:
+
+```bash
+ros2 topic echo --once /cumotion/robot_spheres
+ros2 topic hz /joint_states
+```
 
 ## Robot Description
 

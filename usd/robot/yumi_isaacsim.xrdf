@@ -1,0 +1,136 @@
+format: xrdf
+format_version: 1.0
+
+modifiers:
+  - set_base_frame: yumi_body
+
+default_joint_positions:
+  yumi_joint_1_l: 2.4
+  yumi_joint_2_l: -0.6
+  yumi_joint_7_l: 0.2
+  yumi_joint_3_l: 0.2
+  yumi_joint_4_l: -1.2
+  yumi_joint_5_l: 0.3
+  yumi_joint_6_l: 0.0
+  yumi_joint_1_r: -1.2
+  yumi_joint_2_r: -0.8
+  yumi_joint_7_r: -0.4
+  yumi_joint_3_r: -0.6
+  yumi_joint_4_r: 1.2
+  yumi_joint_5_r: 0.8
+  yumi_joint_6_r: 0.0
+  gripper_l_joint: 0.0
+  gripper_r_joint: 0.0
+
+cspace:
+  joint_names:
+    - yumi_joint_1_l
+    - yumi_joint_2_l
+    - yumi_joint_7_l
+    - yumi_joint_3_l
+    - yumi_joint_4_l
+    - yumi_joint_5_l
+    - yumi_joint_6_l
+    - yumi_joint_1_r
+    - yumi_joint_2_r
+    - yumi_joint_7_r
+    - yumi_joint_3_r
+    - yumi_joint_4_r
+    - yumi_joint_5_r
+    - yumi_joint_6_r
+    - gripper_l_joint
+    - gripper_r_joint
+  acceleration_limits: [10.0, 10.0, 10.0, 10.0, 20.0, 20.0, 20.0, 10.0, 10.0, 10.0, 10.0, 20.0, 20.0, 20.0, 2.0, 2.0]
+  jerk_limits: [300.0, 300.0, 300.0, 300.0, 500.0, 500.0, 500.0, 300.0, 300.0, 300.0, 300.0, 500.0, 500.0, 500.0, 20.0, 20.0]
+  retract_config: [2.4, -0.6, 0.2, 0.2, -1.2, 0.3, 0.0, -1.2, -0.8, -0.4, -0.6, 1.2, 0.8, 0.0, 0.0, 0.0]
+  cspace_distance_weight: [1.0, 1.0, 1.0, 1.0, 0.5, 0.5, 0.5, 1.0, 1.0, 1.0, 1.0, 0.5, 0.5, 0.5, 0.05, 0.05]
+
+tool_frames:
+  - gripper_r_grasp_frame
+
+geometry:
+  yumi_right_arm_collision:
+    spheres:
+      yumi_body:
+        - center: [0.0, -0.07, 0.42]
+          radius: 0.10
+        - center: [0.0, 0.0, 0.26]
+          radius: 0.18
+      yumi_link_1_r:
+        - center: [0.0, -0.03, 0.05]
+          radius: 0.07
+        - center: [0.0, -0.03, 0.14]
+          radius: 0.07
+      yumi_link_2_r:
+        - center: [0.0, 0.05, 0.0]
+          radius: 0.07
+        - center: [0.0, 0.12, 0.0]
+          radius: 0.06
+      yumi_link_3_r:
+        - center: [0.0, 0.05, 0.02]
+          radius: 0.06
+        - center: [0.0, 0.13, 0.02]
+          radius: 0.055
+      yumi_link_4_r:
+        - center: [0.0, 0.04, 0.0]
+          radius: 0.055
+        - center: [0.0, 0.12, 0.0]
+          radius: 0.05
+      yumi_link_5_r:
+        - center: [0.0, 0.0, 0.04]
+          radius: 0.05
+        - center: [0.0, 0.0, 0.09]
+          radius: 0.045
+      yumi_link_6_r:
+        - center: [0.0, 0.015, 0.0]
+          radius: 0.045
+        - center: [0.0, 0.015, 0.05]
+          radius: 0.04
+      yumi_link_7_r:
+        - center: [0.0, 0.0, 0.02]
+          radius: 0.04
+      gripper_r_base:
+        - center: [0.0, 0.0, 0.03]
+          radius: 0.04
+        - center: [0.0, 0.0, 0.085]
+          radius: 0.03
+      gripper_r_finger_r:
+        - center: [0.0, 0.0, 0.03]
+          radius: 0.015
+        - center: [0.0, 0.0, 0.07]
+          radius: 0.012
+      gripper_r_finger_l:
+        - center: [0.0, 0.0, 0.03]
+          radius: 0.015
+        - center: [0.0, 0.0, 0.07]
+          radius: 0.012
+
+collision:
+  geometry: yumi_right_arm_collision
+  buffer_distance:
+    yumi_body: 0.01
+    yumi_link_1_r: 0.01
+    yumi_link_2_r: 0.01
+    yumi_link_3_r: 0.01
+    yumi_link_4_r: 0.01
+    yumi_link_5_r: 0.01
+    yumi_link_6_r: 0.01
+    yumi_link_7_r: 0.01
+    gripper_r_base: 0.005
+    gripper_r_finger_r: 0.003
+    gripper_r_finger_l: 0.003
+
+self_collision:
+  geometry: yumi_right_arm_collision
+  ignore:
+    yumi_body: [yumi_link_1_r, yumi_link_2_r]
+    yumi_link_1_r: [yumi_body, yumi_link_2_r, yumi_link_3_r]
+    yumi_link_2_r: [yumi_body, yumi_link_1_r, yumi_link_3_r]
+    yumi_link_3_r: [yumi_link_1_r, yumi_link_2_r, yumi_link_4_r, yumi_link_5_r, yumi_link_6_r, yumi_link_7_r]
+    yumi_link_4_r: [yumi_link_3_r, yumi_link_5_r, yumi_link_6_r, yumi_link_7_r]
+    yumi_link_5_r: [yumi_link_3_r, yumi_link_4_r, yumi_link_6_r, yumi_link_7_r, gripper_r_base]
+    yumi_link_6_r: [yumi_link_3_r, yumi_link_4_r, yumi_link_5_r, yumi_link_7_r, gripper_r_base]
+    yumi_link_7_r: [yumi_link_3_r, yumi_link_4_r, yumi_link_5_r, yumi_link_6_r, gripper_r_base, gripper_r_finger_r, gripper_r_finger_l]
+    gripper_r_base: [yumi_link_5_r, yumi_link_6_r, yumi_link_7_r, gripper_r_finger_r, gripper_r_finger_l]
+    gripper_r_finger_r: [yumi_link_7_r, gripper_r_base, gripper_r_finger_l]
+    gripper_r_finger_l: [yumi_link_7_r, gripper_r_base, gripper_r_finger_r]

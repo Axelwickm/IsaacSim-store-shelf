@@ -25,6 +25,9 @@ def generate_launch_description() -> LaunchDescription:
     use_moveit_rviz = LaunchConfiguration("use_moveit_rviz")
     controller_spawner_delay = LaunchConfiguration("controller_spawner_delay")
     move_group_delay = LaunchConfiguration("move_group_delay")
+    move_group_log_level = LaunchConfiguration("move_group_log_level")
+    cumotion_robot_xrdf = LaunchConfiguration("cumotion_robot_xrdf")
+    cumotion_urdf_path = LaunchConfiguration("cumotion_urdf_path")
 
     return LaunchDescription(
         [
@@ -66,6 +69,21 @@ def generate_launch_description() -> LaunchDescription:
                     "move_group."
                 ),
             ),
+            DeclareLaunchArgument(
+                "move_group_log_level",
+                default_value="info",
+                description="ROS log level for move_group.",
+            ),
+            DeclareLaunchArgument(
+                "cumotion_robot_xrdf",
+                default_value="/workspace/usd/robot/yumi_isaacsim.xrdf",
+                description="XRDF file for the standalone cuMotion planner node.",
+            ),
+            DeclareLaunchArgument(
+                "cumotion_urdf_path",
+                default_value="/workspace/usd/robot/yumi_isaacsim.urdf",
+                description="URDF file for the standalone cuMotion planner node.",
+            ),
             Node(
                 package="controller",
                 executable="controller",
@@ -87,6 +105,9 @@ def generate_launch_description() -> LaunchDescription:
                     "use_sim_time": "true",
                     "controller_spawner_delay": controller_spawner_delay,
                     "move_group_delay": move_group_delay,
+                    "move_group_log_level": move_group_log_level,
+                    "cumotion_robot_xrdf": cumotion_robot_xrdf,
+                    "cumotion_urdf_path": cumotion_urdf_path,
                 }.items(),
             ),
         ]

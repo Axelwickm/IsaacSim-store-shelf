@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from control_msgs.action import FollowJointTrajectory
-from rclpy.action import ActionServer, CancelResponse, GoalResponse
+from rclpy.action import ActionServer, CancelResponse
 from rclpy.executors import MultiThreadedExecutor
 from rclpy.node import Node
 from trajectory_msgs.msg import JointTrajectoryPoint
@@ -25,6 +25,7 @@ RIGHT_ARM_JOINTS = (
     "yumi_joint_5_r",
     "yumi_joint_6_r",
 )
+RIGHT_ARM_JOINT_SET = set(RIGHT_ARM_JOINTS)
 
 
 @dataclass
@@ -67,7 +68,6 @@ class IsaacSimTrajectoryExecutor:
         self._active: ActiveTrajectory | None = None
         self._lock = threading.Lock()
         self._articulation = None
-        self._articulation_controller = None
         self._articulation_action_type = None
 
         self._node = Node("isaacsim_follow_joint_trajectory")
@@ -78,7 +78,6 @@ class IsaacSimTrajectoryExecutor:
             FollowJointTrajectory,
             action_name,
             execute_callback=self._execute_goal,
-            goal_callback=self._handle_goal_request,
             cancel_callback=self._handle_cancel_request,
         )
         self._spin_thread = threading.Thread(
@@ -92,32 +91,37 @@ class IsaacSimTrajectoryExecutor:
             f"(action={action_name}, articulation={articulation_root_path})"
         )
 
-    def _handle_goal_request(self, goal_request) -> GoalResponse:
-        trajectory = goal_request.trajectory
-        if list(trajectory.joint_names) != list(RIGHT_ARM_JOINTS):
-            self._node.get_logger().error(
-                "Rejecting trajectory with unexpected joints: "
-                + ", ".join(trajectory.joint_names)
-            )
-            return GoalResponse.REJECT
-        if not trajectory.points:
-            self._node.get_logger().error("Rejecting empty trajectory.")
-            return GoalResponse.REJECT
-        with self._lock:
-            if self._active is not None:
-                self._node.get_logger().warning("Rejecting trajectory while one is active.")
-                return GoalResponse.REJECT
-        return GoalResponse.ACCEPT
-
     def _handle_cancel_request(self, _goal_handle) -> CancelResponse:
         return CancelResponse.ACCEPT
 
     def _execute_goal(self, goal_handle):
         done_event = threading.Event()
+        joint_names = list(goal_handle.request.trajectory.joint_names)
         points = list(goal_handle.request.trajectory.points)
+        if set(joint_names) != RIGHT_ARM_JOINT_SET:
+            error = (
+                "Unexpected trajectory joints: "
+                + ", ".join(joint_names)
+                + "; expected right-arm joint set: "
+                + ", ".join(RIGHT_ARM_JOINTS)
+            )
+            self._node.get_logger().error(error)
+            goal_handle.abort()
+            return _result(RESULT_GOAL_TOLERANCE_VIOLATED, error)
+        if not points:
+            error = "Empty trajectory."
+            self._node.get_logger().error(error)
+            goal_handle.abort()
+            return _result(RESULT_GOAL_TOLERANCE_VIOLATED, error)
+        with self._lock:
+            if self._active is not None:
+                error = "A direct Isaac Sim trajectory is already active."
+                self._node.get_logger().warning(error)
+                goal_handle.abort()
+                return _result(RESULT_GOAL_TOLERANCE_VIOLATED, error)
         active = ActiveTrajectory(
             goal_handle=goal_handle,
-            joint_names=list(goal_handle.request.trajectory.joint_names),
+            joint_names=joint_names,
             joint_indices=None,
             points=points,
             final_time=_point_time(points[-1]),
@@ -176,6 +180,10 @@ class IsaacSimTrajectoryExecutor:
         self._finish(active, RESULT_GOAL_TOLERANCE_VIOLATED, error)
         self._node.get_logger().warning(f"Direct Isaac Sim trajectory did not settle: {error}")
 
+    def has_active_trajectory(self) -> bool:
+        with self._lock:
+            return self._active is not None
+
     def _finish(self, active: ActiveTrajectory, error_code: int, error_string: str = "") -> None:
         active.result = _result(error_code, error_string)
         with self._lock:
@@ -188,14 +196,10 @@ class IsaacSimTrajectoryExecutor:
         if self._articulation is not None:
             return
         try:
-            from isaacsim.core.api.controllers.articulation_controller import (
-                ArticulationController,
-            )
             from isaacsim.core.prims import SingleArticulation
             from isaacsim.core.utils.types import ArticulationAction
         except ImportError:
             from omni.isaac.core.articulations import Articulation as SingleArticulation
-            from omni.isaac.core.controllers import ArticulationController
             from omni.isaac.core.utils.types import ArticulationAction
 
         self._articulation_action_type = ArticulationAction
@@ -204,8 +208,6 @@ class IsaacSimTrajectoryExecutor:
             name="yumi_direct_trajectory_articulation",
         )
         self._articulation.initialize()
-        self._articulation_controller = ArticulationController()
-        self._articulation_controller.initialize(self._articulation)
         self._node.get_logger().info(
             "Initialized direct Isaac articulation controller for "
             f"{self._articulation_root_path}"
@@ -259,7 +261,7 @@ class IsaacSimTrajectoryExecutor:
             joint_positions=np.array(point.positions, dtype=np.float64),
             joint_indices=active.joint_indices,
         )
-        self._articulation_controller.apply_action(action)
+        self._articulation.apply_action(action)
 
     def _publish_feedback(
         self,
