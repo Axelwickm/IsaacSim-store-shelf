@@ -8,8 +8,9 @@ from pathlib import Path
 from typing import Any
 
 import rclpy
+import yaml
 from ament_index_python.packages import PackageNotFoundError, get_package_share_directory
-from geometry_msgs.msg import PointStamped, PoseStamped
+from geometry_msgs.msg import PointStamped, Pose, PoseStamped
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Empty
@@ -20,23 +21,29 @@ try:
     from moveit_msgs.action import MoveGroup
     from moveit_msgs.msg import (
         BoundingVolume,
+        CollisionObject,
         Constraints,
         DisplayTrajectory,
         MotionPlanRequest,
         OrientationConstraint,
+        PlanningSceneComponents,
         PlanningOptions,
         PositionConstraint,
         RobotState,
     )
+    from moveit_msgs.srv import GetPlanningScene
     from rclpy.action import ActionClient
     from shape_msgs.msg import SolidPrimitive
 
     MOVEIT_ACTIONS_AVAILABLE = True
 except ModuleNotFoundError:
+    CollisionObject = None
     Duration = None
     FollowJointTrajectory = None
     DisplayTrajectory = None
     MoveGroup = None
+    GetPlanningScene = None
+    PlanningSceneComponents = None
     ActionClient = None
     MOVEIT_ACTIONS_AVAILABLE = False
 
@@ -186,6 +193,22 @@ class MotionPlannerNode(Node):
         self.declare_parameter("move_group_result_timeout", 30.0)
         self.declare_parameter("move_group_observability_interval", 5.0)
         self.declare_parameter("move_group_debug_dump_dir", "/tmp/motion_planner_debug")
+        self.declare_parameter("robot_xrdf", "/workspace/usd/robot/yumi_isaacsim.xrdf")
+        self.declare_parameter("robot_urdf", "/workspace/usd/robot/yumi_isaacsim.urdf")
+        self.declare_parameter("planned_trajectory_collision_diagnostic", True)
+        self.declare_parameter("inject_other_arm_collision_objects", True)
+        self.declare_parameter("other_arm_collision_radius_padding", 0.005)
+        self.declare_parameter(
+            "required_planning_scene_object_ids",
+            [
+                "shelf_board_0",
+                "shelf_board_1",
+                "shelf_board_3",
+                "shelf_board_4",
+                "shelf_back_panel",
+            ],
+        )
+        self.declare_parameter("planning_scene_ready_poll_period", 0.5)
         self.declare_parameter("num_planning_attempts", 5)
         self.declare_parameter("max_velocity_scaling_factor", 0.2)
         self.declare_parameter("max_acceleration_scaling_factor", 0.2)
@@ -239,6 +262,7 @@ class MotionPlannerNode(Node):
         self._joint_state_ready = False
         self._logged_joint_state_names = False
         self._pick_in_progress = False
+        self._pending_pick_point: PointStamped | None = None
         self._pick_sequence: list[MotionStep] = []
         self._pick_sequence_index = 0
         self._pick_generation = 0
@@ -305,6 +329,28 @@ class MotionPlannerNode(Node):
             str(self.get_parameter("move_group_debug_dump_dir").value)
         )
         self._move_group_debug_dump_dir.mkdir(parents=True, exist_ok=True)
+        self._robot_xrdf = Path(str(self.get_parameter("robot_xrdf").value))
+        self._robot_urdf = Path(str(self.get_parameter("robot_urdf").value))
+        self._planned_trajectory_collision_diagnostic = bool(
+            self.get_parameter("planned_trajectory_collision_diagnostic").value
+        )
+        self._inject_other_arm_collision_objects = bool(
+            self.get_parameter("inject_other_arm_collision_objects").value
+        )
+        self._other_arm_collision_radius_padding = max(
+            float(self.get_parameter("other_arm_collision_radius_padding").value),
+            0.0,
+        )
+        self._required_planning_scene_object_ids = {
+            str(object_id)
+            for object_id in self.get_parameter(
+                "required_planning_scene_object_ids"
+            ).value
+        }
+        self._planning_scene_ready_poll_period = max(
+            float(self.get_parameter("planning_scene_ready_poll_period").value),
+            0.1,
+        )
         self._num_planning_attempts = int(
             self.get_parameter("num_planning_attempts").value
         )
@@ -314,6 +360,20 @@ class MotionPlannerNode(Node):
         self._max_acceleration_scaling_factor = float(
             self.get_parameter("max_acceleration_scaling_factor").value
         )
+        self._collision_model = None
+        self._collision_tensor_args = None
+        self._collision_joint_names: list[str] = []
+        self._collision_sphere_links: list[str] = []
+        self._collision_sphere_labels: list[str] = []
+        self._collision_ignored_link_pairs: set[frozenset[str]] = set()
+        self._last_planned_collision_waypoint_index: int | None = None
+        self._last_planned_collision_waypoint_joint_names: list[str] = []
+        self._last_planned_collision_waypoint_positions: list[float] = []
+        self._planning_scene_client: Any | None = None
+        self._planning_scene_ready = not self._required_planning_scene_object_ids
+        self._planning_scene_request_in_flight = False
+        self._planning_scene_ready_logged = False
+        self._pending_pick_retry_timer: Any | None = None
         self._latched_target_point_publisher = self.create_publisher(
             PointStamped,
             latched_target_point_topic,
@@ -359,6 +419,10 @@ class MotionPlannerNode(Node):
                 self,
                 FollowJointTrajectory,
                 direct_trajectory_action,
+            )
+            self._planning_scene_client = self.create_client(
+                GetPlanningScene,
+                "/get_planning_scene",
             )
 
         self._target_pose_subscription = self.create_subscription(
@@ -412,6 +476,11 @@ class MotionPlannerNode(Node):
             f"MoveGroup debug artifacts will be written under "
             f"{self._move_group_debug_dump_dir}"
         )
+        if self._required_planning_scene_object_ids:
+            self.get_logger().info(
+                "Will defer planning until MoveIt planning scene contains: "
+                + ", ".join(sorted(self._required_planning_scene_object_ids))
+            )
         if not MOVEIT_ACTIONS_AVAILABLE:
             self.get_logger().warning(
                 "moveit_msgs is not importable in this environment. The planner will "
@@ -479,6 +548,7 @@ class MotionPlannerNode(Node):
         self._latched_target_point = deepcopy(
             self._latest_world_selected_item_point or message
         )
+        self._pending_pick_point = deepcopy(message)
         self._latched_target_point_publisher.publish(self._latched_target_point)
         self.get_logger().info(
             "Latched selected item point for visualization in frame "
@@ -491,12 +561,7 @@ class MotionPlannerNode(Node):
         )
         self._publish_grasp_debug_poses_in_moveit_frame(message)
         if self._auto_execute_pick:
-            if not self._joint_state_ready or self._latest_joint_state is None:
-                self.get_logger().warning(
-                    "Deferring pick start until a valid /joint_states message is available."
-                )
-                return
-            self._start_pick_sequence(message)
+            self._ensure_pick_prerequisites()
 
     def _handle_clear_latched_target(self, _message: Empty) -> None:
         if self._latched_target_point is None:
@@ -506,6 +571,7 @@ class MotionPlannerNode(Node):
 
         point = self._latched_target_point.point
         self._latched_target_point = None
+        self._pending_pick_point = None
         self._abort_pick_sequence("clear requested")
         self.get_logger().info(
             "Cleared latched target point at "
@@ -518,6 +584,7 @@ class MotionPlannerNode(Node):
 
         point = self._latched_target_point.point
         self._latched_target_point = None
+        self._pending_pick_point = None
         self.get_logger().info(
             f"Released {reason} target at "
             f"({point.x:.3f}, {point.y:.3f}, {point.z:.3f}); "
@@ -591,6 +658,7 @@ class MotionPlannerNode(Node):
             self.get_logger().warning("Pick sequence is already running; ignoring target.")
             return
 
+        self._pending_pick_point = None
         pregrasp_pose, grasp_pose, retract_pose, drop_pose = self._build_grasp_poses(point)
         self._pick_sequence = [
             MotionStep("approach pregrasp", pose=pregrasp_pose),
@@ -637,6 +705,87 @@ class MotionPlannerNode(Node):
         self._active_move_request_summary = ""
         self._active_move_request_profile = {}
         self._active_move_started_monotonic = 0.0
+        self._cancel_pending_pick_retry()
+
+    def _ensure_pick_prerequisites(self) -> None:
+        if self._pending_pick_point is None or self._pick_in_progress:
+            return
+        if not self._joint_state_ready or self._latest_joint_state is None:
+            self.get_logger().warning(
+                "Deferring pick start until a valid /joint_states message is available."
+            )
+            self._schedule_pending_pick_retry()
+            return
+        if not self._planning_scene_ready:
+            self._request_planning_scene_readiness_check()
+            self.get_logger().warning(
+                "Deferring pick start until required planning scene objects are available."
+            )
+            self._schedule_pending_pick_retry()
+            return
+        self._cancel_pending_pick_retry()
+        self._start_pick_sequence(self._pending_pick_point)
+
+    def _schedule_pending_pick_retry(self) -> None:
+        if self._pending_pick_retry_timer is not None:
+            return
+        self._pending_pick_retry_timer = self.create_timer(
+            self._planning_scene_ready_poll_period,
+            self._retry_pending_pick_once,
+        )
+
+    def _cancel_pending_pick_retry(self) -> None:
+        if self._pending_pick_retry_timer is not None:
+            self._pending_pick_retry_timer.cancel()
+            self._pending_pick_retry_timer = None
+
+    def _retry_pending_pick_once(self) -> None:
+        self._cancel_pending_pick_retry()
+        self._ensure_pick_prerequisites()
+
+    def _request_planning_scene_readiness_check(self) -> None:
+        if (
+            self._planning_scene_ready
+            or self._planning_scene_request_in_flight
+            or self._planning_scene_client is None
+        ):
+            return
+        if not self._planning_scene_client.service_is_ready():
+            return
+        request = GetPlanningScene.Request()
+        request.components.components = PlanningSceneComponents.WORLD_OBJECT_NAMES
+        self._planning_scene_request_in_flight = True
+        future = self._planning_scene_client.call_async(request)
+        future.add_done_callback(self._handle_planning_scene_readiness_result)
+
+    def _handle_planning_scene_readiness_result(self, future: Any) -> None:
+        self._planning_scene_request_in_flight = False
+        try:
+            response = future.result()
+        except Exception as error:
+            self.get_logger().warning(
+                f"Planning scene readiness check failed: {error}",
+                throttle_duration_sec=5.0,
+            )
+            return
+        object_ids = {
+            collision_object.id
+            for collision_object in response.scene.world.collision_objects
+        }
+        missing = sorted(self._required_planning_scene_object_ids - object_ids)
+        if missing:
+            self.get_logger().info(
+                "Waiting for planning scene objects: " + ", ".join(missing),
+                throttle_duration_sec=5.0,
+            )
+            return
+        self._planning_scene_ready = True
+        if not self._planning_scene_ready_logged:
+            self._planning_scene_ready_logged = True
+            self.get_logger().info(
+                "Planning scene is ready; required shelf collision objects are present."
+            )
+        self._ensure_pick_prerequisites()
 
     def _execute_next_pick_step(self) -> None:
         if self._pick_sequence_index >= len(self._pick_sequence):
@@ -776,7 +925,91 @@ class MotionPlannerNode(Node):
         options.replan = False
         options.planning_scene_diff.is_diff = True
         options.planning_scene_diff.robot_state.is_diff = True
+        options.planning_scene_diff.world.collision_objects.extend(
+            self._build_other_arm_collision_objects()
+        )
         return options
+
+    def _build_other_arm_collision_objects(self) -> list[Any]:
+        if (
+            not self._inject_other_arm_collision_objects
+            or self._latest_joint_state is None
+            or CollisionObject is None
+        ):
+            return []
+        try:
+            if self._collision_model is None or self._collision_tensor_args is None:
+                self._load_collision_model()
+        except Exception as error:
+            self.get_logger().warn(
+                f"Other-arm collision object injection unavailable: {error}",
+                throttle_duration_sec=5.0,
+            )
+            return []
+
+        import torch
+
+        position_map = {
+            name: float(position)
+            for name, position in zip(
+                self._latest_joint_state.name,
+                self._latest_joint_state.position,
+                strict=False,
+            )
+        }
+        missing = [
+            joint_name
+            for joint_name in self._collision_joint_names
+            if joint_name not in position_map
+        ]
+        if missing:
+            self.get_logger().warn(
+                "Skipping other-arm collision object injection; missing joint state for "
+                + ", ".join(missing),
+                throttle_duration_sec=5.0,
+            )
+            return []
+
+        q = torch.tensor(
+            [[position_map[joint_name] for joint_name in self._collision_joint_names]],
+            device=self._collision_tensor_args.device,
+            dtype=self._collision_tensor_args.dtype,
+        )
+        spheres = (
+            self._collision_model.get_state(q)
+            .link_spheres_tensor[0]
+            .detach()
+            .cpu()
+            .numpy()
+        )
+        collision_objects = []
+        for index, sphere_values in enumerate(spheres):
+            link_name = self._collision_sphere_links[index]
+            if not (link_name.endswith("_l") or link_name.startswith("gripper_l_")):
+                continue
+            x, y, z, radius = [float(value) for value in sphere_values]
+            if radius <= 0.0:
+                continue
+
+            primitive = SolidPrimitive()
+            primitive.type = SolidPrimitive.SPHERE
+            primitive.dimensions = [radius + self._other_arm_collision_radius_padding]
+
+            pose = Pose()
+            pose.position.x = x
+            pose.position.y = y
+            pose.position.z = z
+            pose.orientation.w = 1.0
+
+            collision_object = CollisionObject()
+            collision_object.header.frame_id = self._moveit_target_frame
+            collision_object.id = f"other_arm_sphere_{index}"
+            collision_object.operation = CollisionObject.ADD
+            collision_object.primitives.append(primitive)
+            collision_object.primitive_poses.append(pose)
+            collision_objects.append(collision_object)
+
+        return collision_objects
 
     def _build_direct_trajectory_goal(self, trajectory: Any) -> Any:
         goal = FollowJointTrajectory.Goal()
@@ -1050,6 +1283,7 @@ class MotionPlannerNode(Node):
                 f"MoveGroup planned final joints for {step.name!r}: {planned_final}"
             )
         self._publish_display_trajectory(planned_trajectory)
+        self._log_planned_trajectory_collisions(step, planned_trajectory)
         self._write_move_group_debug_artifact(
             self._active_move_request_id,
             "succeeded",
@@ -1095,6 +1329,355 @@ class MotionPlannerNode(Node):
             display.trajectory_start = RobotState()
         display.trajectory.append(deepcopy(planned_trajectory))
         self._display_trajectory_publisher.publish(display)
+
+    def _load_collision_model(self) -> None:
+        from curobo.cuda_robot_model.cuda_robot_generator import CudaRobotGeneratorConfig
+        from curobo.cuda_robot_model.cuda_robot_model import (
+            CudaRobotModel,
+            CudaRobotModelConfig,
+        )
+        from curobo.cuda_robot_model.util import load_robot_yaml
+        from curobo.types.base import TensorDeviceType
+        from curobo.types.file_path import ContentPath
+
+        if not self._robot_xrdf.is_file():
+            raise FileNotFoundError(f"cuMotion XRDF not found: {self._robot_xrdf}")
+        if not self._robot_urdf.is_file():
+            raise FileNotFoundError(f"cuMotion URDF not found: {self._robot_urdf}")
+
+        self._collision_sphere_links = []
+        self._collision_sphere_labels = []
+        self._collision_ignored_link_pairs = set()
+
+        with self._robot_xrdf.open("r", encoding="utf-8") as stream:
+            xrdf: dict[str, Any] = yaml.safe_load(stream)
+        collision = xrdf.get("collision") or {}
+        geometry_name = collision.get("geometry")
+        geometry = ((xrdf.get("geometry") or {}).get(geometry_name) or {})
+        for link_name, spheres in (geometry.get("spheres") or {}).items():
+            for local_index, _sphere in enumerate(spheres or []):
+                self._collision_sphere_links.append(str(link_name))
+                self._collision_sphere_labels.append(f"{link_name}[{local_index}]")
+        for link_name, ignored_links in ((xrdf.get("self_collision") or {}).get("ignore") or {}).items():
+            for ignored_link in ignored_links or []:
+                self._collision_ignored_link_pairs.add(
+                    frozenset((str(link_name), str(ignored_link)))
+                )
+
+        self._collision_tensor_args = TensorDeviceType()
+        content_path = ContentPath(
+            robot_xrdf_absolute_path=str(self._robot_xrdf),
+            robot_urdf_absolute_path=str(self._robot_urdf),
+        )
+        robot_yaml = load_robot_yaml(content_path)
+        kinematics_config = robot_yaml["robot_cfg"]["kinematics"]
+        model_config = CudaRobotModelConfig.from_config(
+            CudaRobotGeneratorConfig(
+                **kinematics_config,
+                tensor_args=self._collision_tensor_args,
+            )
+        )
+        self._collision_model = CudaRobotModel(model_config)
+        self._collision_joint_names = list(self._collision_model.joint_names)
+
+    def _find_sphere_collisions(
+        self,
+        spheres: Any,
+    ) -> list[tuple[float, str, str, float, float]]:
+        collisions: list[tuple[float, str, str, float, float]] = []
+        active = []
+        for index, sphere in enumerate(spheres):
+            x, y, z, radius = [float(value) for value in sphere]
+            if radius > 0.0:
+                active.append(
+                    (
+                        index,
+                        self._collision_sphere_links[index],
+                        self._collision_sphere_labels[index],
+                        x,
+                        y,
+                        z,
+                        radius,
+                    )
+                )
+        for first_offset, first in enumerate(active):
+            (
+                _first_index,
+                first_link,
+                first_label,
+                first_x,
+                first_y,
+                first_z,
+                first_radius,
+            ) = first
+            for second in active[first_offset + 1 :]:
+                (
+                    _second_index,
+                    second_link,
+                    second_label,
+                    second_x,
+                    second_y,
+                    second_z,
+                    second_radius,
+                ) = second
+                if first_link == second_link:
+                    continue
+                if frozenset((first_link, second_link)) in self._collision_ignored_link_pairs:
+                    continue
+                dx = first_x - second_x
+                dy = first_y - second_y
+                dz = first_z - second_z
+                distance = (dx * dx + dy * dy + dz * dz) ** 0.5
+                radius_sum = first_radius + second_radius
+                penetration = radius_sum - distance
+                if penetration > 0.001:
+                    collisions.append(
+                        (
+                            penetration,
+                            first_label,
+                            second_label,
+                            distance,
+                            radius_sum,
+                        )
+                    )
+        collisions.sort(reverse=True)
+        return collisions
+
+    def _trajectory_position_samples(
+        self,
+        points: list[Any],
+    ) -> list[tuple[str, list[float]]]:
+        samples: list[tuple[str, list[float]]] = []
+        if not points:
+            return samples
+        samples.append(("waypoint[0]", [float(value) for value in points[0].positions]))
+        for index in range(1, len(points)):
+            previous = points[index - 1]
+            current = points[index]
+            previous_positions = [float(value) for value in previous.positions]
+            current_positions = [float(value) for value in current.positions]
+            midpoint_positions = [
+                (previous_position + current_position) * 0.5
+                for previous_position, current_position in zip(
+                    previous_positions,
+                    current_positions,
+                    strict=False,
+                )
+            ]
+            samples.append((f"midpoint[{index - 1}->{index}]", midpoint_positions))
+            samples.append((f"waypoint[{index}]", current_positions))
+        return samples
+
+    def _log_planned_trajectory_collisions(
+        self,
+        step: MotionStep,
+        planned_trajectory: Any | None,
+    ) -> None:
+        if (
+            not self._planned_trajectory_collision_diagnostic
+            or planned_trajectory is None
+            or self._latest_joint_state is None
+        ):
+            return
+        joint_trajectory = getattr(planned_trajectory, "joint_trajectory", None)
+        if joint_trajectory is None:
+            return
+        points = list(getattr(joint_trajectory, "points", []))
+        if not points:
+            return
+        try:
+            if self._collision_model is None or self._collision_tensor_args is None:
+                self._load_collision_model()
+        except Exception as error:
+            self.get_logger().warn(
+                f"Planned trajectory collision diagnostic unavailable: {error}",
+                throttle_duration_sec=5.0,
+            )
+            return
+
+        import torch
+
+        position_map = {
+            name: float(position)
+            for name, position in zip(
+                self._latest_joint_state.name,
+                self._latest_joint_state.position,
+                strict=False,
+            )
+        }
+        missing = [
+            joint_name
+            for joint_name in self._collision_joint_names
+            if joint_name not in position_map
+        ]
+        if missing:
+            self.get_logger().warn(
+                "Skipping planned trajectory collision diagnostic; missing joint state for "
+                + ", ".join(missing),
+                throttle_duration_sec=5.0,
+            )
+            return
+
+        trajectory_joint_names = list(getattr(joint_trajectory, "joint_names", []))
+        worst = None
+        worst_sample_label = ""
+        worst_collision_count = 0
+        colliding_samples = 0
+        colliding_sample_labels: list[str] = []
+        worst_sample_positions: list[float] | None = None
+        for sample_label, sample_positions in self._trajectory_position_samples(points):
+            for joint_name, position in zip(
+                trajectory_joint_names, sample_positions, strict=False
+            ):
+                position_map[joint_name] = float(position)
+            q = torch.tensor(
+                [[position_map[joint_name] for joint_name in self._collision_joint_names]],
+                device=self._collision_tensor_args.device,
+                dtype=self._collision_tensor_args.dtype,
+            )
+            spheres = (
+                self._collision_model.get_state(q)
+                .link_spheres_tensor[0]
+                .detach()
+                .cpu()
+                .numpy()
+            )
+            collisions = self._find_sphere_collisions(spheres)
+            if not collisions:
+                continue
+            colliding_samples += 1
+            colliding_sample_labels.append(sample_label)
+            if worst is None or collisions[0][0] > worst[0]:
+                worst = collisions[0]
+                worst_sample_label = sample_label
+                worst_collision_count = len(collisions)
+                worst_sample_positions = list(sample_positions)
+        if worst is None:
+            self._last_planned_collision_waypoint_index = None
+            self._last_planned_collision_waypoint_joint_names = []
+            self._last_planned_collision_waypoint_positions = []
+            self.get_logger().info(
+                f"Planned trajectory collision diagnostic for {step.name!r}: "
+                f"no non-ignored sphere overlaps across {len(points)} waypoints "
+                f"or interpolated midpoints "
+                f"(request_id={self._active_move_request_id})."
+            )
+            return
+        penetration, first_label, second_label, distance, radius_sum = worst
+        sample_joint_summary = "unknown"
+        if worst_sample_positions is not None:
+            self._last_planned_collision_waypoint_joint_names = list(trajectory_joint_names)
+            self._last_planned_collision_waypoint_positions = list(worst_sample_positions)
+            self._last_planned_collision_waypoint_index = None
+            if worst_sample_label.startswith("waypoint[") and worst_sample_label.endswith("]"):
+                try:
+                    self._last_planned_collision_waypoint_index = int(
+                        worst_sample_label[len("waypoint[") : -1]
+                    )
+                except ValueError:
+                    self._last_planned_collision_waypoint_index = None
+            sample_joint_summary = ", ".join(
+                f"{joint_name}={position:.4f}"
+                for joint_name, position in zip(
+                    trajectory_joint_names,
+                    worst_sample_positions,
+                    strict=False,
+                )
+            )
+        self.get_logger().warn(
+            f"Planned trajectory collision diagnostic for {step.name!r}: "
+            f"{colliding_samples} sampled states have non-ignored sphere overlaps. "
+            f"Colliding samples={colliding_sample_labels}. "
+            f"Worst at {worst_sample_label}: "
+            f"{first_label} <-> {second_label} penetration={penetration:.4f}m "
+            f"distance={distance:.4f}m radius_sum={radius_sum:.4f}m "
+            f"(sample_collisions={worst_collision_count}, "
+            f"sample_joints={sample_joint_summary}, "
+            f"request_id={self._active_move_request_id})."
+        )
+        self._log_final_planned_state_collision(step, trajectory_joint_names, points[-1])
+
+    def _log_final_planned_state_collision(
+        self,
+        step: MotionStep,
+        trajectory_joint_names: list[str],
+        final_point: Any,
+    ) -> None:
+        if (
+            self._collision_model is None
+            or self._collision_tensor_args is None
+            or self._latest_joint_state is None
+        ):
+            return
+
+        import torch
+
+        position_map = {
+            name: float(position)
+            for name, position in zip(
+                self._latest_joint_state.name,
+                self._latest_joint_state.position,
+                strict=False,
+            )
+        }
+        final_positions = [float(value) for value in getattr(final_point, "positions", [])]
+        for joint_name, position in zip(
+            trajectory_joint_names, final_positions, strict=False
+        ):
+            position_map[joint_name] = float(position)
+
+        missing = [
+            joint_name
+            for joint_name in self._collision_joint_names
+            if joint_name not in position_map
+        ]
+        if missing:
+            self.get_logger().warn(
+                "Skipping final planned state collision diagnostic; missing joint state for "
+                + ", ".join(missing),
+                throttle_duration_sec=5.0,
+            )
+            return
+
+        q = torch.tensor(
+            [[position_map[joint_name] for joint_name in self._collision_joint_names]],
+            device=self._collision_tensor_args.device,
+            dtype=self._collision_tensor_args.dtype,
+        )
+        spheres = (
+            self._collision_model.get_state(q)
+            .link_spheres_tensor[0]
+            .detach()
+            .cpu()
+            .numpy()
+        )
+        collisions = self._find_sphere_collisions(spheres)
+        final_joint_summary = ", ".join(
+            f"{joint_name}={position:.4f}"
+            for joint_name, position in zip(
+                trajectory_joint_names,
+                final_positions,
+                strict=False,
+            )
+        )
+        if not collisions:
+            self.get_logger().info(
+                f"Final planned state collision diagnostic for {step.name!r}: "
+                f"terminal waypoint is collision-free "
+                f"(sample_joints={final_joint_summary}, "
+                f"request_id={self._active_move_request_id})."
+            )
+            return
+
+        penetration, first_label, second_label, distance, radius_sum = collisions[0]
+        self.get_logger().warn(
+            f"Final planned state collision diagnostic for {step.name!r}: "
+            f"terminal waypoint has {len(collisions)} non-ignored sphere overlaps. "
+            f"Worst: {first_label} <-> {second_label} penetration={penetration:.4f}m "
+            f"distance={distance:.4f}m radius_sum={radius_sum:.4f}m "
+            f"(sample_joints={final_joint_summary}, "
+            f"request_id={self._active_move_request_id})."
+        )
 
     def _send_direct_trajectory(
         self,
@@ -1230,6 +1813,7 @@ class MotionPlannerNode(Node):
             f"Direct trajectory completed pick step {step.name!r}: "
             f"action_status={status}, request_id={self._active_move_request_id}."
         )
+        self._log_actual_vs_planned_collision_waypoint(step)
         self._write_move_group_debug_artifact(
             self._active_move_request_id,
             "executed",
@@ -1273,6 +1857,44 @@ class MotionPlannerNode(Node):
             },
         )
         self._clear_direct_trajectory_observability()
+
+    def _log_actual_vs_planned_collision_waypoint(self, step: MotionStep) -> None:
+        if (
+            self._latest_joint_state is None
+            or self._last_planned_collision_waypoint_index is None
+            or not self._last_planned_collision_waypoint_joint_names
+            or not self._last_planned_collision_waypoint_positions
+        ):
+            return
+        actual_positions = {
+            name: float(position)
+            for name, position in zip(
+                self._latest_joint_state.name,
+                self._latest_joint_state.position,
+                strict=False,
+            )
+        }
+        comparisons = []
+        for joint_name, planned_position in zip(
+            self._last_planned_collision_waypoint_joint_names,
+            self._last_planned_collision_waypoint_positions,
+            strict=False,
+        ):
+            if joint_name not in actual_positions:
+                continue
+            actual_position = actual_positions[joint_name]
+            comparisons.append(
+                f"{joint_name}: planned={planned_position:.4f}, "
+                f"actual={actual_position:.4f}, "
+                f"delta={actual_position - planned_position:.4f}"
+            )
+        if comparisons:
+            self.get_logger().info(
+                f"Actual vs worst planned collision waypoint for {step.name!r} "
+                f"(waypoint={self._last_planned_collision_waypoint_index}, "
+                f"request_id={self._active_move_request_id}): "
+                + "; ".join(comparisons)
+            )
 
     def _clear_direct_trajectory_observability(self) -> None:
         self._move_group_goal_may_be_active = False

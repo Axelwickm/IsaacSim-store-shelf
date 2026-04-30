@@ -170,48 +170,48 @@ collision:
   geometry: yumi_right_arm_collision
   buffer_distance:
     yumi_body: 0.01
-    yumi_link_1_l: 0.01
-    yumi_link_1_r: 0.01
-    yumi_link_2_l: 0.01
-    yumi_link_2_r: 0.01
-    yumi_link_3_l: 0.01
-    yumi_link_3_r: 0.01
-    yumi_link_4_l: 0.01
-    yumi_link_4_r: 0.01
-    yumi_link_5_l: 0.01
-    yumi_link_5_r: 0.01
-    yumi_link_6_l: 0.01
-    yumi_link_6_r: 0.01
-    yumi_link_7_l: 0.01
-    yumi_link_7_r: 0.01
-    gripper_l_base: 0.005
-    gripper_l_finger_r: 0.003
-    gripper_l_finger_l: 0.003
-    gripper_r_base: 0.005
-    gripper_r_finger_r: 0.003
-    gripper_r_finger_l: 0.003
+    yumi_link_1_l: 0.004
+    yumi_link_1_r: 0.004
+    yumi_link_2_l: 0.004
+    yumi_link_2_r: 0.004
+    yumi_link_3_l: 0.006
+    yumi_link_3_r: 0.006
+    yumi_link_4_l: 0.004
+    yumi_link_4_r: 0.004
+    yumi_link_5_l: 0.006
+    yumi_link_5_r: 0.006
+    yumi_link_6_l: 0.006
+    yumi_link_6_r: 0.006
+    yumi_link_7_l: 0.006
+    yumi_link_7_r: 0.006
+    gripper_l_base: 0.003
+    gripper_l_finger_r: 0.001
+    gripper_l_finger_l: 0.001
+    gripper_r_base: 0.003
+    gripper_r_finger_r: 0.001
+    gripper_r_finger_l: 0.001
 
 self_collision:
   geometry: yumi_right_arm_collision
   ignore:
     yumi_body: [yumi_link_1_l, yumi_link_2_l, yumi_link_1_r, yumi_link_2_r]
-    yumi_link_1_l: [yumi_body, yumi_link_2_l, yumi_link_3_l]
-    yumi_link_1_r: [yumi_body, yumi_link_2_r, yumi_link_3_r]
-    yumi_link_2_l: [yumi_body, yumi_link_1_l, yumi_link_3_l]
-    yumi_link_2_r: [yumi_body, yumi_link_1_r, yumi_link_3_r]
-    yumi_link_3_l: [yumi_link_1_l, yumi_link_2_l, yumi_link_4_l, yumi_link_5_l, yumi_link_6_l, yumi_link_7_l]
-    yumi_link_3_r: [yumi_link_1_r, yumi_link_2_r, yumi_link_4_r, yumi_link_5_r, yumi_link_6_r, yumi_link_7_r]
-    yumi_link_4_l: [yumi_link_3_l, yumi_link_5_l, yumi_link_6_l, yumi_link_7_l]
-    yumi_link_4_r: [yumi_link_3_r, yumi_link_5_r, yumi_link_6_r, yumi_link_7_r]
-    yumi_link_5_l: [yumi_link_3_l, yumi_link_4_l, yumi_link_6_l, yumi_link_7_l, gripper_l_base]
-    yumi_link_5_r: [yumi_link_3_r, yumi_link_4_r, yumi_link_6_r, yumi_link_7_r, gripper_r_base]
-    yumi_link_6_l: [yumi_link_3_l, yumi_link_4_l, yumi_link_5_l, yumi_link_7_l, gripper_l_base]
-    yumi_link_6_r: [yumi_link_3_r, yumi_link_4_r, yumi_link_5_r, yumi_link_7_r, gripper_r_base]
-    yumi_link_7_l: [yumi_link_3_l, yumi_link_4_l, yumi_link_5_l, yumi_link_6_l, gripper_l_base, gripper_l_finger_r, gripper_l_finger_l]
-    yumi_link_7_r: [yumi_link_3_r, yumi_link_4_r, yumi_link_5_r, yumi_link_6_r, gripper_r_base, gripper_r_finger_r, gripper_r_finger_l]
+    yumi_link_1_l: [yumi_body, yumi_link_1_r, yumi_link_2_l, yumi_link_2_r]
+    yumi_link_1_r: [yumi_body, yumi_link_1_l, yumi_link_2_l, yumi_link_2_r]
+    yumi_link_2_l: [yumi_body, yumi_link_1_l, yumi_link_1_r, yumi_link_3_l]
+    yumi_link_2_r: [yumi_body, yumi_link_1_l, yumi_link_1_r, yumi_link_3_r]
+    yumi_link_3_l: [yumi_link_2_l, yumi_link_4_l]
+    yumi_link_3_r: [yumi_link_2_r, yumi_link_4_r]
+    yumi_link_4_l: [yumi_link_3_l, yumi_link_5_l]
+    yumi_link_4_r: [yumi_link_3_r, yumi_link_5_r]
+    yumi_link_5_l: [yumi_link_4_l, yumi_link_6_l, yumi_link_7_l, gripper_l_base]
+    yumi_link_5_r: [yumi_link_4_r, yumi_link_6_r, yumi_link_7_r, gripper_r_base]
+    yumi_link_6_l: [yumi_link_5_l, yumi_link_7_l, gripper_l_base]
+    yumi_link_6_r: [yumi_link_5_r, yumi_link_7_r, gripper_r_base]
+    yumi_link_7_l: [yumi_link_5_l, yumi_link_6_l, gripper_l_base]
+    yumi_link_7_r: [yumi_link_5_r, yumi_link_6_r, gripper_r_base]
     gripper_l_base: [yumi_link_5_l, yumi_link_6_l, yumi_link_7_l, gripper_l_finger_r, gripper_l_finger_l]
-    gripper_l_finger_r: [yumi_link_7_l, gripper_l_base, gripper_l_finger_l]
-    gripper_l_finger_l: [yumi_link_7_l, gripper_l_base, gripper_l_finger_r]
+    gripper_l_finger_r: [gripper_l_base, gripper_l_finger_l]
+    gripper_l_finger_l: [gripper_l_base, gripper_l_finger_r]
     gripper_r_base: [yumi_link_5_r, yumi_link_6_r, yumi_link_7_r, gripper_r_finger_r, gripper_r_finger_l]
-    gripper_r_finger_r: [yumi_link_7_r, gripper_r_base, gripper_r_finger_l]
-    gripper_r_finger_l: [yumi_link_7_r, gripper_r_base, gripper_r_finger_r]
+    gripper_r_finger_r: [gripper_r_base, gripper_r_finger_l]
+    gripper_r_finger_l: [gripper_r_base, gripper_r_finger_r]

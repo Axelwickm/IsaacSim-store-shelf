@@ -12,7 +12,7 @@ from launch.actions import (
 from launch.conditions import IfCondition
 from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch.substitutions import Command, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from moveit_configs_utils import MoveItConfigsBuilder
 
@@ -66,23 +66,29 @@ def generate_launch_description() -> LaunchDescription:
     move_group_log_level = LaunchConfiguration("move_group_log_level")
     cumotion_robot_xrdf = LaunchConfiguration("cumotion_robot_xrdf")
     cumotion_urdf_path = LaunchConfiguration("cumotion_urdf_path")
+    yumi_description_xacro = (
+        Path(get_package_share_directory("yumi_description"))
+        / "urdf"
+        / "yumi.urdf.xacro"
+    )
+    robot_description = {
+        "robot_description": Command(
+            [
+                "xacro",
+                " ",
+                str(yumi_description_xacro),
+                " ",
+                "use_ros2_control:=true",
+                " ",
+                f"joint_states_topic:={ISAAC_JOINT_STATES_TOPIC}",
+                " ",
+                f"joint_commands_topic:={JOINT_COMMAND_TOPIC}",
+            ]
+        )
+    }
 
     moveit_config = (
         MoveItConfigsBuilder("yumi", package_name="yumi_moveit_config")
-        .robot_description(
-            file_path=str(
-                Path(get_package_share_directory("yumi_description"))
-                / "urdf"
-                / "yumi.urdf.xacro"
-            ),
-            mappings={
-                "arms_interface": "PositionJointInterface",
-                "grippers_interface": "PositionJointInterface",
-                "use_ros2_control": "true",
-                "joint_states_topic": ISAAC_JOINT_STATES_TOPIC,
-                "joint_commands_topic": JOINT_COMMAND_TOPIC,
-            },
-        )
         .robot_description_semantic(file_path="config/yumi.srdf")
         .robot_description_kinematics(file_path="config/kinematics.yaml")
         .joint_limits(file_path="config/joint_limits.yaml")
@@ -123,6 +129,7 @@ def generate_launch_description() -> LaunchDescription:
         arguments=["--ros-args", "--log-level", move_group_log_level],
         parameters=[
             moveit_config.to_dict(),
+            robot_description,
             {"default_planning_pipeline": planning_pipeline},
             planning_scene_monitor_parameters,
             start_state_bounds_parameters,
@@ -180,7 +187,7 @@ def generate_launch_description() -> LaunchDescription:
         executable="ros2_control_node",
         output="screen",
         parameters=[
-            moveit_config.robot_description,
+            robot_description,
             ros2_controllers_path,
             {"use_sim_time": False},
         ],
@@ -192,7 +199,7 @@ def generate_launch_description() -> LaunchDescription:
         package="robot_state_publisher",
         executable="robot_state_publisher",
         output="screen",
-        parameters=[moveit_config.robot_description, {"use_sim_time": use_sim_time}],
+        parameters=[robot_description, {"use_sim_time": use_sim_time}],
     )
 
     rviz_node = Node(
@@ -202,7 +209,7 @@ def generate_launch_description() -> LaunchDescription:
         output="screen",
         arguments=["-d", rviz_config_path],
         parameters=[
-            moveit_config.robot_description,
+            robot_description,
             moveit_config.robot_description_semantic,
             moveit_config.robot_description_kinematics,
             moveit_config.planning_pipelines,

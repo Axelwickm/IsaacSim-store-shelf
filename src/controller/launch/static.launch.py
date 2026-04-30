@@ -24,22 +24,9 @@ def generate_launch_description() -> LaunchDescription:
         [FindPackageShare("yumi_moveit_config"), "rviz", "cumotion_debug.rviz"]
     )
     yumi_moveit_config_share = Path(get_package_share_directory("yumi_moveit_config"))
+    yumi_description_share = Path(get_package_share_directory("yumi_description"))
     robot_description_content = ParameterValue(
-        Command(
-            [
-                "xacro ",
-                str(
-                    Path(get_package_share_directory("yumi_description"))
-                    / "urdf"
-                    / "yumi.urdf.xacro"
-                ),
-                " arms_interface:=PositionJointInterface",
-                " grippers_interface:=PositionJointInterface",
-                " use_ros2_control:=true",
-                " joint_states_topic:=/isaac_joint_states",
-                " joint_commands_topic:=/joint_command",
-            ]
-        ),
+        Command(["xacro ", str(yumi_description_share / "urdf" / "yumi.urdf.xacro")]),
         value_type=str,
     )
     robot_description_semantic = {
