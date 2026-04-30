@@ -470,24 +470,6 @@ class VisionInferenceNode(Node):
                     f"from {world_point.header.frame_id} to {self._moveit_target_frame_id}: {error}"
                 )
 
-        if self._frame_count == 0 or self._frame_count % self._log_every == 0:
-            self.get_logger().info(
-                f"Published selected item query={query_index} "
-                f"mean_alpha={query_alpha_score:.3f} pixel=({u:.1f},{v:.1f}) "
-                f"range={range_m:.3f}m z_depth={depth_m:.3f}m "
-                f"camera_xyz=({camera_pose.pose.position.x:.3f}, "
-                f"{camera_pose.pose.position.y:.3f}, "
-                f"{camera_pose.pose.position.z:.3f}) "
-                f"world_xyz=({world_point.point.x:.3f}, "
-                f"{world_point.point.y:.3f}, "
-                f"{world_point.point.z:.3f}) "
-                f"roundtrip_pixel=({roundtrip_u:.1f},{roundtrip_v:.1f}) "
-                f"camera_world={self._format_pose_position(camera_origin_world)} "
-                f"target_minus_camera_world={self._format_vec3(target_from_camera_world)} "
-                f"optical_forward_dot={optical_forward_dot:.3f} "
-                f"moveit_xyz={self._format_point(moveit_point)}"
-            )
-
     def _format_pose_position(self, pose: PoseStamped | None) -> str:
         if pose is None:
             return "(nan,nan,nan)"
@@ -602,17 +584,6 @@ class VisionInferenceNode(Node):
 
         self._frame_count += 1
         self._inference_time_sum += inference_elapsed
-        if self._frame_count == 1 or self._frame_count % self._log_every == 0:
-            average_inference_ms = 1000.0 * self._inference_time_sum / self._frame_count
-            self.get_logger().info(
-                f"Processed {self._frame_count} frames "
-                f"(last_inference_ms={1000.0 * inference_elapsed:.1f}, "
-                f"avg_inference_ms={average_inference_ms:.1f}, "
-                f"identity_nonzero={(outputs['predicted_identity'][0] > 0).sum().item()}, "
-                f"depth_max={outputs['predicted_depth'][0].max().item():.3f}, "
-                f"occupancy_max={outputs['predicted_occupancy'][0].max().item():.3f})"
-            )
-
 
 def main() -> None:
     rclpy.init()

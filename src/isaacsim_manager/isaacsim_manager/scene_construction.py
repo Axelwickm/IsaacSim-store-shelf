@@ -66,7 +66,7 @@ YUMI_STORE_DEMO_READY_JOINT_POSITIONS_RAD = {
     "yumi_joint_5_r": 0.8,
     "yumi_joint_6_r": 0.0,
 }
-DEFAULT_ARM_DRIVE_STIFFNESS = 10000.0
+DEFAULT_ARM_DRIVE_STIFFNESS = 6000.0
 DEFAULT_ARM_DRIVE_DAMPING = 1000.0
 DEFAULT_ARM_DRIVE_MAX_FORCE = 5000.0
 
@@ -963,8 +963,9 @@ def construct_scene(configuration: str) -> dict:
     ros2_joint_bridge = None
     ros2_camera_bridge = None
     dropoff_target_markers = None
-    if configuration == "store_demo":
+    if configuration in {"store_demo", "static"}:
         ros2_joint_bridge = configure_ros2_joint_bridge(stage, robot_prim_path)
+    if configuration == "store_demo":
         dropoff_target_markers = add_dropoff_target_markers(stage, robot_prim_path)
         camera_prim_path = add_robot_owned_camera(stage, robot_prim_path)
         ros2_camera_bridge = configure_ros2_camera_bridge(

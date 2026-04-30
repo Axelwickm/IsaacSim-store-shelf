@@ -129,6 +129,21 @@ current `/joint_states`, and publishes a `visualization_msgs/MarkerArray` in
 the `yumi_body` frame. Use this to compare cuMotion's robot collision model
 against the visible robot before editing the XRDF.
 
+For sphere tuning without the full MoveIt stack, launch static mode:
+
+```bash
+ros2 launch controller static.launch.py use_rviz:=true
+```
+
+`static.launch.py` now starts `motion/cumotion_sphere_publisher` directly, so
+RViz can be used to define and tune cuMotion collision spheres from
+`/workspace/usd/robot/yumi_isaacsim.xrdf` against the visible robot mesh.
+Edits to the XRDF or `/workspace/usd/robot/yumi_isaacsim.urdf` are reloaded
+live by the publisher in this mode, which makes it practical to iterate on
+sphere centers and radii manually. This live reload affects the debug sphere
+visualization only; the standalone cuMotion planner still needs a restart to
+pick up the same file changes.
+
 If RViz is already running and no spheres appear, verify:
 
 ```bash

@@ -12,6 +12,12 @@ def generate_launch_description() -> LaunchDescription:
     target_pose_topic = LaunchConfiguration("target_pose_topic")
     plan_only = LaunchConfiguration("plan_only")
     move_group_result_timeout = LaunchConfiguration("move_group_result_timeout")
+    direct_trajectory_result_timeout = LaunchConfiguration(
+        "direct_trajectory_result_timeout"
+    )
+    direct_trajectory_goal_time_tolerance = LaunchConfiguration(
+        "direct_trajectory_goal_time_tolerance"
+    )
     publish_cumotion_spheres = LaunchConfiguration("publish_cumotion_spheres")
     cumotion_robot_xrdf = LaunchConfiguration("cumotion_robot_xrdf")
     cumotion_urdf_path = LaunchConfiguration("cumotion_urdf_path")
@@ -41,12 +47,24 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "plan_only",
                 default_value="false",
-                description="Whether MoveIt requests should plan only without execution.",
+                description=(
+                    "Plan with MoveIt/cuMotion but skip direct trajectory execution."
+                ),
             ),
             DeclareLaunchArgument(
                 "move_group_result_timeout",
-                default_value="120.0",
-                description="Seconds to wait for a MoveGroup action result, including execution.",
+                default_value="30.0",
+                description="Seconds to wait for a MoveGroup plan-only action result.",
+            ),
+            DeclareLaunchArgument(
+                "direct_trajectory_result_timeout",
+                default_value="30.0",
+                description="Seconds to wait for the direct Isaac trajectory action result.",
+            ),
+            DeclareLaunchArgument(
+                "direct_trajectory_goal_time_tolerance",
+                default_value="30.0",
+                description="Goal time tolerance sent to the direct trajectory executor.",
             ),
             DeclareLaunchArgument(
                 "publish_cumotion_spheres",
@@ -76,6 +94,8 @@ def generate_launch_description() -> LaunchDescription:
                         "target_pose_topic": target_pose_topic,
                         "plan_only": plan_only,
                         "move_group_result_timeout": move_group_result_timeout,
+                        "direct_trajectory_result_timeout": direct_trajectory_result_timeout,
+                        "direct_trajectory_goal_time_tolerance": direct_trajectory_goal_time_tolerance,
                     }
                 ],
             ),

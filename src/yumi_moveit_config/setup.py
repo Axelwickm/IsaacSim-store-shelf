@@ -27,4 +27,9 @@ setup(
     maintainer_email="axel@example.com",
     description="MoveIt configuration package for ABB YuMi in Isaac Sim store shelf.",
     license="BSD-2-Clause",
+    entry_points={
+        "console_scripts": [
+            "static_planning_scene = yumi_moveit_config.static_planning_scene:main",
+        ],
+    },
 )

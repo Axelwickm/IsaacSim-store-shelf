@@ -15,10 +15,13 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Empty
 
 try:
+    from builtin_interfaces.msg import Duration
+    from control_msgs.action import FollowJointTrajectory
     from moveit_msgs.action import MoveGroup
     from moveit_msgs.msg import (
         BoundingVolume,
         Constraints,
+        DisplayTrajectory,
         MotionPlanRequest,
         OrientationConstraint,
         PlanningOptions,
@@ -30,6 +33,9 @@ try:
 
     MOVEIT_ACTIONS_AVAILABLE = True
 except ModuleNotFoundError:
+    Duration = None
+    FollowJointTrajectory = None
+    DisplayTrajectory = None
     MoveGroup = None
     ActionClient = None
     MOVEIT_ACTIONS_AVAILABLE = False
@@ -107,14 +113,15 @@ RELEASE_TARGET_ON_MOVEIT_ERROR_CODES = {
 MOVE_GROUP_SERVER_WAIT_SECONDS = 5.0
 MOVE_GROUP_SERVER_RETRY_SECONDS = 2.0
 JOINT_POSITION_LIMITS = {
-    "yumi_joint_1_r": (-2.93, 2.93),
-    "yumi_joint_2_r": (-2.49, 0.74),
-    "yumi_joint_7_r": (-2.93, 2.93),
-    "yumi_joint_3_r": (-2.14, 1.38),
-    "yumi_joint_4_r": (-5.0, 5.0),
-    "yumi_joint_5_r": (-1.52, 2.36),
-    "yumi_joint_6_r": (-3.95, 3.95),
+    "yumi_joint_1_r": (-2.84, 2.84),
+    "yumi_joint_2_r": (-2.4, 0.65),
+    "yumi_joint_7_r": (-2.84, 2.84),
+    "yumi_joint_3_r": (-2.0, 1.29),
+    "yumi_joint_4_r": (-4.9, 4.9),
+    "yumi_joint_5_r": (-1.43, 2.3),
+    "yumi_joint_6_r": (-3.89, 3.89),
 }
+JOINT_LIMIT_MARGIN_RAD = 1e-3
 RIGHT_ARM_JOINT_ORDER = (
     "yumi_joint_1_r",
     "yumi_joint_2_r",
@@ -136,12 +143,18 @@ class MotionPlannerNode(Node):
         self.declare_parameter("pipeline_id", "isaac_ros_cumotion")
         self.declare_parameter("planner_id", "cuMotion")
         self.declare_parameter("move_group_action", "/move_action")
+        self.declare_parameter(
+            "direct_trajectory_action",
+            "right_arm_controller/follow_joint_trajectory",
+        )
+        self.declare_parameter("direct_trajectory_result_timeout", 30.0)
+        self.declare_parameter("direct_trajectory_goal_time_tolerance", 30.0)
         self.declare_parameter("joint_command_topic", "/joint_command")
         self.declare_parameter("right_gripper_joint", "gripper_r_joint")
         self.declare_parameter("right_gripper_mimic_joint", "gripper_r_joint_m")
         self.declare_parameter("right_gripper_open_position", 0.025)
         self.declare_parameter("right_gripper_closed_position", 0.0)
-        self.declare_parameter("gripper_command_settle_seconds", 1.0)
+        self.declare_parameter("gripper_command_settle_seconds", 0.0)
         self.declare_parameter("target_pose_topic", "/motion/target_pose")
         self.declare_parameter("selected_item_point_topic", "/vision/selected_item_point")
         self.declare_parameter(
@@ -150,6 +163,10 @@ class MotionPlannerNode(Node):
         )
         self.declare_parameter("latched_target_point_topic", "/motion/latched_target_point")
         self.declare_parameter("clear_latched_target_topic", "/motion/clear_latched_target")
+        self.declare_parameter(
+            "display_trajectory_topic",
+            "/moveit/display_planned_path",
+        )
         self.declare_parameter("auto_execute_pick", True)
         self.declare_parameter("plan_only", True)
         self.declare_parameter("pregrasp_offset_xyz", [0.0, 0.0, 0.08])
@@ -182,6 +199,9 @@ class MotionPlannerNode(Node):
         pipeline_id = str(self.get_parameter("pipeline_id").value)
         planner_id = str(self.get_parameter("planner_id").value)
         move_group_action = str(self.get_parameter("move_group_action").value)
+        direct_trajectory_action = str(
+            self.get_parameter("direct_trajectory_action").value
+        )
         joint_command_topic = str(self.get_parameter("joint_command_topic").value)
         target_pose_topic = str(self.get_parameter("target_pose_topic").value)
         selected_item_point_topic = str(
@@ -195,6 +215,9 @@ class MotionPlannerNode(Node):
         )
         clear_latched_target_topic = str(
             self.get_parameter("clear_latched_target_topic").value
+        )
+        display_trajectory_topic = str(
+            self.get_parameter("display_trajectory_topic").value
         )
         self._right_gripper_joint = str(self.get_parameter("right_gripper_joint").value)
         self._right_gripper_mimic_joint = str(
@@ -234,6 +257,14 @@ class MotionPlannerNode(Node):
         self._planner_id = planner_id
         self._auto_execute_pick = bool(self.get_parameter("auto_execute_pick").value)
         self._plan_only = bool(self.get_parameter("plan_only").value)
+        self._direct_trajectory_result_timeout = max(
+            float(self.get_parameter("direct_trajectory_result_timeout").value),
+            0.0,
+        )
+        self._direct_trajectory_goal_time_tolerance = max(
+            float(self.get_parameter("direct_trajectory_goal_time_tolerance").value),
+            0.0,
+        )
         self._pregrasp_offset_xyz = self._float_list_parameter("pregrasp_offset_xyz", 3)
         self._grasp_offset_xyz = self._float_list_parameter("grasp_offset_xyz", 3)
         self._retract_offset_xyz = self._float_list_parameter("retract_offset_xyz", 3)
@@ -313,9 +344,22 @@ class MotionPlannerNode(Node):
             "/motion/drop_pose",
             10,
         )
+        self._display_trajectory_publisher = None
+        if MOVEIT_ACTIONS_AVAILABLE:
+            self._display_trajectory_publisher = self.create_publisher(
+                DisplayTrajectory,
+                display_trajectory_topic,
+                10,
+            )
         self._move_group_client: Any | None = None
+        self._direct_trajectory_client: Any | None = None
         if MOVEIT_ACTIONS_AVAILABLE:
             self._move_group_client = ActionClient(self, MoveGroup, move_group_action)
+            self._direct_trajectory_client = ActionClient(
+                self,
+                FollowJointTrajectory,
+                direct_trajectory_action,
+            )
 
         self._target_pose_subscription = self.create_subscription(
             PoseStamped,
@@ -352,7 +396,8 @@ class MotionPlannerNode(Node):
             "Motion planner scaffold ready "
             f"(group={planning_group}, right_arm={self._right_arm_group}, "
             f"target_frame={self._moveit_target_frame}, "
-            f"pipeline={pipeline_id}, planner={planner_id}, plan_only={self._plan_only})"
+            f"pipeline={pipeline_id}, planner={planner_id}, "
+            f"direct_execute={not self._plan_only})"
         )
         self.get_logger().info(
             f"Listening for target poses on {target_pose_topic}."
@@ -584,7 +629,7 @@ class MotionPlannerNode(Node):
         if self._active_goal_handle is not None:
             self.get_logger().info(
                 f"Stopped local pick sequence after {reason}; not canceling active "
-                "MoveGroup goal because MoveGroup can crash on preempt in this setup."
+                "action goal because preempt can crash this setup."
             )
             self._active_goal_handle = None
         self._active_move_step_name = ""
@@ -610,10 +655,13 @@ class MotionPlannerNode(Node):
                 f"Marked right gripper {state}. "
                 "Published direct joint command to Isaac Sim."
             )
-            self._step_timer = self.create_timer(
-                self._gripper_command_settle_seconds,
-                self._execute_next_pick_step_once,
-            )
+            if self._gripper_command_settle_seconds <= 0.0:
+                self._execute_next_pick_step()
+            else:
+                self._step_timer = self.create_timer(
+                    self._gripper_command_settle_seconds,
+                    self._execute_next_pick_step_once,
+                )
             return
 
         if step.pose is None:
@@ -629,8 +677,8 @@ class MotionPlannerNode(Node):
             return
         if self._move_group_goal_may_be_active:
             self.get_logger().error(
-                "Not sending a new MoveGroup goal because the previous goal may still "
-                "be active inside MoveGroup. Restart move_group before retrying."
+                "Not sending a new plan because a previous planning or execution goal "
+                "may still be active. Restart the stack before retrying."
             )
             self._fail_pick_sequence()
             return
@@ -659,8 +707,7 @@ class MotionPlannerNode(Node):
             },
         )
         self.get_logger().info(
-            f"Sending MoveGroup {'plan' if self._plan_only else 'goal'} "
-            f"request_id={request_id} for {step.name!r}: "
+            f"Sending MoveGroup plan request_id={request_id} for {step.name!r}: "
             f"{request_summary}"
         )
         generation = self._pick_generation
@@ -697,6 +744,18 @@ class MotionPlannerNode(Node):
             raise RuntimeError(f"Cannot build MoveGroup goal for {step.name!r} without pose.")
 
         goal = MoveGroup.Goal()
+        goal.request = self._build_motion_plan_request(step)
+        goal.planning_options = self._build_planning_options()
+        return goal
+
+    def _build_motion_plan_request(
+        self,
+        step: MotionStep,
+        include_start_state: bool = True,
+    ) -> Any:
+        if step.pose is None:
+            raise RuntimeError(f"Cannot build MotionPlanRequest for {step.name!r} without pose.")
+
         request = MotionPlanRequest()
         request.group_name = self._right_arm_group
         request.pipeline_id = self._pipeline_id
@@ -705,19 +764,33 @@ class MotionPlannerNode(Node):
         request.allowed_planning_time = self._allowed_planning_time
         request.max_velocity_scaling_factor = self._max_velocity_scaling_factor
         request.max_acceleration_scaling_factor = self._max_acceleration_scaling_factor
-        request.start_state = self._build_start_state()
+        if include_start_state:
+            request.start_state = self._build_start_state()
         request.goal_constraints = [self._build_pose_constraints(step)]
+        return request
 
+    def _build_planning_options(self) -> Any:
         options = PlanningOptions()
-        options.plan_only = self._plan_only
+        options.plan_only = True
         options.look_around = False
-        options.replan = True
+        options.replan = False
         options.planning_scene_diff.is_diff = True
         options.planning_scene_diff.robot_state.is_diff = True
+        return options
 
-        goal.request = request
-        goal.planning_options = options
+    def _build_direct_trajectory_goal(self, trajectory: Any) -> Any:
+        goal = FollowJointTrajectory.Goal()
+        goal.trajectory = deepcopy(trajectory.joint_trajectory)
+        goal.goal_time_tolerance = self._duration_seconds_msg(
+            self._direct_trajectory_goal_time_tolerance
+        )
         return goal
+
+    def _duration_seconds_msg(self, seconds: float) -> Duration:
+        duration = Duration()
+        duration.sec = int(seconds)
+        duration.nanosec = int((seconds - duration.sec) * 1e9)
+        return duration
 
     def _publish_right_gripper_command(self, closed: bool) -> None:
         joint_command = JointState()
@@ -750,8 +823,8 @@ class MotionPlannerNode(Node):
                 continue
             lower, upper = limits
             joint_state.position[index] = min(
-                max(joint_state.position[index], lower),
-                upper,
+                max(joint_state.position[index], lower + JOINT_LIMIT_MARGIN_RAD),
+                upper - JOINT_LIMIT_MARGIN_RAD,
             )
 
     def _build_pose_constraints(self, step: MotionStep) -> Any:
@@ -933,6 +1006,7 @@ class MotionPlannerNode(Node):
         executed_final = self._trajectory_final_joint_summary(
             getattr(result, "executed_trajectory", None)
         )
+        planned_trajectory = getattr(result, "planned_trajectory", None)
         if error_code != 1:
             self.get_logger().error(
                 f"MoveGroup failed pick step {step.name!r}: "
@@ -965,20 +1039,17 @@ class MotionPlannerNode(Node):
             return
 
         self.get_logger().info(
-            f"MoveGroup completed pick step {step.name!r}: "
+            f"MoveGroup planned pick step {step.name!r}: "
             f"error={error_name} ({error_code}), action_status={action_status}, "
             f"planning_time={planning_time:.3f}s, "
-            f"planned_points={planned_points}, executed_points={executed_points}, "
+            f"planned_points={planned_points}, "
             f"request_id={self._active_move_request_id}."
         )
         if planned_final:
             self.get_logger().info(
                 f"MoveGroup planned final joints for {step.name!r}: {planned_final}"
             )
-        if executed_final:
-            self.get_logger().info(
-                f"MoveGroup executed final joints for {step.name!r}: {executed_final}"
-            )
+        self._publish_display_trajectory(planned_trajectory)
         self._write_move_group_debug_artifact(
             self._active_move_request_id,
             "succeeded",
@@ -995,8 +1066,224 @@ class MotionPlannerNode(Node):
                 "profile": self._active_move_request_profile,
             },
         )
-        self._clear_active_move_observability()
+        if self._plan_only:
+            self._clear_active_move_observability()
+            self._execute_next_pick_step()
+            return
+        if planned_points <= 0 or planned_trajectory is None:
+            self.get_logger().error(
+                f"MoveGroup returned no planned trajectory for pick step {step.name!r}."
+            )
+            self._pick_in_progress = False
+            self._clear_active_move_observability()
+            self._release_latched_target("empty MoveGroup plan")
+            return
+        self._send_direct_trajectory(step, planned_trajectory, generation)
+
+    def _publish_display_trajectory(self, planned_trajectory: Any | None) -> None:
+        if (
+            planned_trajectory is None
+            or DisplayTrajectory is None
+            or self._display_trajectory_publisher is None
+        ):
+            return
+        display = DisplayTrajectory()
+        display.model_id = "yumi"
+        try:
+            display.trajectory_start = self._build_start_state()
+        except RuntimeError:
+            display.trajectory_start = RobotState()
+        display.trajectory.append(deepcopy(planned_trajectory))
+        self._display_trajectory_publisher.publish(display)
+
+    def _send_direct_trajectory(
+        self,
+        step: MotionStep,
+        planned_trajectory: Any,
+        generation: int,
+    ) -> None:
+        if self._direct_trajectory_client is None:
+            self.get_logger().error(
+                f"Cannot execute {step.name!r}; direct trajectory action support is unavailable."
+            )
+            self._pick_in_progress = False
+            self._clear_active_move_observability()
+            return
+        if not self._direct_trajectory_client.server_is_ready():
+            self.get_logger().info("Waiting for direct trajectory action server...")
+            if not self._direct_trajectory_client.wait_for_server(
+                timeout_sec=MOVE_GROUP_SERVER_WAIT_SECONDS
+            ):
+                self.get_logger().error(
+                    "Direct trajectory action server is not available; cannot execute "
+                    f"pick step {step.name!r}."
+                )
+                self._pick_in_progress = False
+                self._clear_active_move_observability()
+                return
+
+        goal = self._build_direct_trajectory_goal(planned_trajectory)
+        point_count = len(goal.trajectory.points)
+        final_time = 0.0
+        if goal.trajectory.points:
+            final = goal.trajectory.points[-1].time_from_start
+            final_time = float(final.sec) + float(final.nanosec) * 1e-9
+        self.get_logger().info(
+            f"Sending direct trajectory for pick step {step.name!r}: "
+            f"points={point_count}, duration={final_time:.3f}s, "
+            f"request_id={self._active_move_request_id}."
+        )
+        self._move_group_goal_may_be_active = True
+        self._active_move_step_name = f"{step.name} direct execution"
+        self._active_move_started_monotonic = time.monotonic()
+        timeout = self._direct_trajectory_result_timeout
+        if timeout > 0.0:
+            self._move_result_timer = self.create_timer(
+                timeout,
+                lambda current_step=step, current_generation=generation: self._handle_direct_trajectory_timeout(
+                    current_step,
+                    current_generation,
+                ),
+            )
+        if (
+            self._move_group_observability_interval > 0.0
+            and timeout > self._move_group_observability_interval
+        ):
+            self._move_observability_timer = self.create_timer(
+                self._move_group_observability_interval,
+                self._log_active_move_wait,
+            )
+        send_future = self._direct_trajectory_client.send_goal_async(goal)
+        send_future.add_done_callback(
+            lambda future, current_step=step, current_generation=generation: self._handle_direct_trajectory_goal_response(
+                future,
+                current_step,
+                current_generation,
+            )
+        )
+
+    def _handle_direct_trajectory_goal_response(
+        self,
+        future: Any,
+        step: MotionStep,
+        generation: int,
+    ) -> None:
+        if generation != self._pick_generation:
+            return
+        try:
+            goal_handle = future.result()
+        except Exception as error:
+            self.get_logger().error(
+                f"Direct trajectory goal response failed for pick step {step.name!r}: {error}"
+            )
+            self._pick_in_progress = False
+            self._clear_direct_trajectory_observability()
+            return
+        if not goal_handle.accepted:
+            self.get_logger().error(
+                f"Direct trajectory action rejected pick step {step.name!r}."
+            )
+            self._pick_in_progress = False
+            self._clear_direct_trajectory_observability()
+            return
+        self._active_goal_handle = goal_handle
+        result_future = goal_handle.get_result_async()
+        result_future.add_done_callback(
+            lambda result, current_step=step, current_generation=generation: self._handle_direct_trajectory_result(
+                result,
+                current_step,
+                current_generation,
+            )
+        )
+
+    def _handle_direct_trajectory_result(
+        self,
+        future: Any,
+        step: MotionStep,
+        generation: int,
+    ) -> None:
+        if generation != self._pick_generation:
+            return
+        try:
+            action_result = future.result()
+            result = action_result.result
+        except Exception as error:
+            self.get_logger().error(
+                f"Direct trajectory result failed for pick step {step.name!r}: {error}"
+            )
+            self._pick_in_progress = False
+            self._clear_direct_trajectory_observability()
+            return
+        status = getattr(action_result, "status", None)
+        error_code = int(getattr(result, "error_code", -1))
+        error_string = str(getattr(result, "error_string", ""))
+        if error_code != 0:
+            self.get_logger().error(
+                f"Direct trajectory failed pick step {step.name!r}: "
+                f"error_code={error_code}, action_status={status}, "
+                f"error={error_string}, request_id={self._active_move_request_id}."
+            )
+            self._pick_in_progress = False
+            self._clear_direct_trajectory_observability()
+            return
+        self.get_logger().info(
+            f"Direct trajectory completed pick step {step.name!r}: "
+            f"action_status={status}, request_id={self._active_move_request_id}."
+        )
+        self._write_move_group_debug_artifact(
+            self._active_move_request_id,
+            "executed",
+            {
+                "step_name": step.name,
+                "action_status": status,
+                "error_code": error_code,
+            },
+        )
+        self._clear_direct_trajectory_observability()
         self._execute_next_pick_step()
+
+    def _handle_direct_trajectory_timeout(
+        self,
+        step: MotionStep,
+        generation: int,
+    ) -> None:
+        if generation != self._pick_generation:
+            return
+        elapsed = (
+            time.monotonic() - self._active_move_started_monotonic
+            if self._active_move_started_monotonic > 0.0
+            else self._direct_trajectory_result_timeout
+        )
+        self._pick_generation += 1
+        self._pick_in_progress = False
+        self._active_goal_handle = None
+        self.get_logger().error(
+            f"Direct trajectory did not return a result for pick step {step.name!r} "
+            f"within {self._direct_trajectory_result_timeout:.1f}s "
+            f"(elapsed={elapsed:.1f}s). request_id={self._active_move_request_id}."
+        )
+        self._write_move_group_debug_artifact(
+            self._active_move_request_id,
+            "direct_timeout",
+            {
+                "step_name": step.name,
+                "elapsed": elapsed,
+                "timeout_seconds": self._direct_trajectory_result_timeout,
+                "profile": self._active_move_request_profile,
+            },
+        )
+        self._clear_direct_trajectory_observability()
+
+    def _clear_direct_trajectory_observability(self) -> None:
+        self._move_group_goal_may_be_active = False
+        if self._move_result_timer is not None:
+            self._move_result_timer.cancel()
+            self._move_result_timer = None
+        if self._move_observability_timer is not None:
+            self._move_observability_timer.cancel()
+            self._move_observability_timer = None
+        self._active_goal_handle = None
+        self._clear_active_move_observability()
 
     def _handle_move_result_timeout(self, step: MotionStep, generation: int) -> None:
         if self._move_result_timer is not None:

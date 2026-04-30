@@ -13,10 +13,13 @@
   <depend>controller_manager</depend>
   <depend>joint_state_broadcaster</depend>
   <depend>joint_state_topic_hardware_interface</depend>
+  <depend>geometry_msgs</depend>
   <depend>moveit_configs_utils</depend>
+  <depend>moveit_msgs</depend>
   <depend>moveit_ros_move_group</depend>
   <depend>robot_state_publisher</depend>
   <depend>rviz2</depend>
+  <depend>shape_msgs</depend>
   <depend>xacro</depend>
   <depend>yumi_description</depend>
 

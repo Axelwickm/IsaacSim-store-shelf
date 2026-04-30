@@ -1,0 +1,26 @@
+frame_id: world
+objects:
+  - id: shelf_board_0
+    type: box
+    center: [0.0, -0.01, 0.016]
+    size: [2.74, 0.559452, 0.022]
+
+  - id: shelf_board_1
+    type: box
+    center: [0.0, -0.01, 0.376]
+    size: [2.74, 0.559452, 0.022]
+
+  - id: shelf_board_3
+    type: box
+    center: [0.0, -0.01, 0.726]
+    size: [2.74, 0.559452, 0.022]
+
+  - id: shelf_board_4
+    type: box
+    center: [0.0, -0.01, 1.041]
+    size: [2.74, 0.559452, 0.022]
+
+  - id: shelf_back_panel
+    type: box
+    center: [0.0, 0.27, 0.626]
+    size: [2.74, 0.02, 1.22]

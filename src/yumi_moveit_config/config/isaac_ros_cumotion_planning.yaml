@@ -4,7 +4,5 @@ request_adapters:
   - default_planning_request_adapters/ValidateWorkspaceBounds
   - default_planning_request_adapters/CheckStartStateBounds
   - default_planning_request_adapters/ResolveConstraintFrames
-response_adapters:
-  - default_planning_response_adapters/AddTimeOptimalParameterization
 start_state_max_bounds_error: 0.1
 num_steps: 32

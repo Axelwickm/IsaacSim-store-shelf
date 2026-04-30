@@ -96,12 +96,6 @@ def generate_launch_description() -> LaunchDescription:
         )
         .to_moveit_configs()
     )
-    trajectory_execution = load_yaml(
-        "yumi_moveit_config", "config/trajectory_execution.yaml"
-    )
-    moveit_controllers = load_yaml(
-        "yumi_moveit_config", "config/moveit_controllers.yaml"
-    )
     ros2_controllers_path = str(
         Path(get_package_share_directory("yumi_moveit_config"))
         / "config"
@@ -122,7 +116,6 @@ def generate_launch_description() -> LaunchDescription:
     start_state_bounds_parameters = {
         "start_state_max_bounds_error": 0.02,
     }
-
     move_group_node = Node(
         package="moveit_ros_move_group",
         executable="move_group",
@@ -131,11 +124,24 @@ def generate_launch_description() -> LaunchDescription:
         parameters=[
             moveit_config.to_dict(),
             {"default_planning_pipeline": planning_pipeline},
-            trajectory_execution,
-            moveit_controllers,
             planning_scene_monitor_parameters,
             start_state_bounds_parameters,
             {"use_sim_time": use_sim_time},
+        ],
+    )
+    static_planning_scene_node = Node(
+        package="yumi_moveit_config",
+        executable="static_planning_scene",
+        name="static_planning_scene",
+        output="screen",
+        parameters=[
+            {
+                "collision_config": str(
+                    Path(get_package_share_directory("yumi_moveit_config"))
+                    / "config"
+                    / "store_shelf_collision.yaml"
+                ),
+            }
         ],
     )
     cumotion_ready = PythonExpression(
@@ -283,7 +289,13 @@ def generate_launch_description() -> LaunchDescription:
             OnProcessExit(
                 target_action=joint_state_broadcaster_spawner,
                 on_exit=[
-                    TimerAction(period=move_group_delay, actions=[move_group_node])
+                    TimerAction(
+                        period=move_group_delay,
+                        actions=[
+                            move_group_node,
+                            TimerAction(period=2.0, actions=[static_planning_scene_node]),
+                        ],
+                    )
                 ],
             )
         ),

@@ -1,4 +1,5 @@
 import threading
+import time
 from copy import deepcopy
 from dataclasses import dataclass
 
@@ -11,9 +12,10 @@ from trajectory_msgs.msg import JointTrajectoryPoint
 
 
 DEFAULT_ACTION_NAME = "right_arm_controller/follow_joint_trajectory"
-DEFAULT_GOAL_POSITION_TOLERANCE = 0.15
-DEFAULT_STOPPED_VELOCITY_TOLERANCE = 0.2
-DEFAULT_GOAL_TIME_TOLERANCE_SECONDS = 4.0
+DEFAULT_GOAL_POSITION_TOLERANCE = 0.05
+DEFAULT_STOPPED_VELOCITY_TOLERANCE = 0.25
+DEFAULT_GOAL_TIME_TOLERANCE_SECONDS = 10.0
+MAX_WALL_CLOCK_STEP_SECONDS = 0.25
 RESULT_SUCCESSFUL = 0
 RESULT_GOAL_TOLERANCE_VIOLATED = -5
 RIGHT_ARM_JOINTS = (
@@ -26,6 +28,16 @@ RIGHT_ARM_JOINTS = (
     "yumi_joint_6_r",
 )
 RIGHT_ARM_JOINT_SET = set(RIGHT_ARM_JOINTS)
+RIGHT_ARM_JOINT_LIMITS_RAD = {
+    "yumi_joint_1_r": (-2.84, 2.84),
+    "yumi_joint_2_r": (-2.4, 0.65),
+    "yumi_joint_7_r": (-2.84, 2.84),
+    "yumi_joint_3_r": (-2.0, 1.29),
+    "yumi_joint_4_r": (-4.9, 4.9),
+    "yumi_joint_5_r": (-1.43, 2.3),
+    "yumi_joint_6_r": (-3.89, 3.89),
+}
+JOINT_LIMIT_MARGIN_RAD = 1e-3
 
 
 @dataclass
@@ -37,6 +49,7 @@ class ActiveTrajectory:
     final_time: float
     elapsed: float = 0.0
     settle_elapsed: float = 0.0
+    last_update_monotonic: float = 0.0
     done_event: threading.Event | None = None
     result: FollowJointTrajectory.Result | None = None
 
@@ -125,12 +138,14 @@ class IsaacSimTrajectoryExecutor:
             joint_indices=None,
             points=points,
             final_time=_point_time(points[-1]),
+            last_update_monotonic=time.monotonic(),
             done_event=done_event,
         )
         with self._lock:
             self._active = active
         self._node.get_logger().info(
-            f"Executing direct Isaac Sim trajectory with {len(points)} points."
+            "Executing direct Isaac Sim trajectory "
+            f"with {len(points)} points over {active.final_time:.3f}s."
         )
         done_event.wait()
         return active.result or _result(
@@ -149,6 +164,7 @@ class IsaacSimTrajectoryExecutor:
         if active.joint_indices is None:
             active.joint_indices = self._joint_indices(active.joint_names)
 
+        dt = self._trajectory_time_delta(active, dt)
         goal_handle = active.goal_handle
         if goal_handle.is_cancel_requested:
             goal_handle.canceled()
@@ -183,6 +199,17 @@ class IsaacSimTrajectoryExecutor:
     def has_active_trajectory(self) -> bool:
         with self._lock:
             return self._active is not None
+
+    def _trajectory_time_delta(self, active: ActiveTrajectory, fallback_dt: float) -> float:
+        now = time.monotonic()
+        if active.last_update_monotonic <= 0.0:
+            active.last_update_monotonic = now
+            return fallback_dt
+        elapsed = now - active.last_update_monotonic
+        active.last_update_monotonic = now
+        if elapsed <= 0.0:
+            return fallback_dt
+        return min(elapsed, MAX_WALL_CLOCK_STEP_SECONDS)
 
     def _finish(self, active: ActiveTrajectory, error_code: int, error_string: str = "") -> None:
         active.result = _result(error_code, error_string)
@@ -258,10 +285,29 @@ class IsaacSimTrajectoryExecutor:
 
     def _apply_action(self, active: ActiveTrajectory, point: JointTrajectoryPoint) -> None:
         action = self._articulation_action_type(
-            joint_positions=np.array(point.positions, dtype=np.float64),
+            joint_positions=np.array(
+                self._clamped_positions(active.joint_names, point.positions),
+                dtype=np.float64,
+            ),
             joint_indices=active.joint_indices,
         )
         self._articulation.apply_action(action)
+
+    def _clamped_positions(
+        self,
+        joint_names: list[str],
+        positions: list[float],
+    ) -> list[float]:
+        clamped = []
+        for joint_name, position in zip(joint_names, positions):
+            lower, upper = RIGHT_ARM_JOINT_LIMITS_RAD[joint_name]
+            clamped.append(
+                min(
+                    max(position, lower + JOINT_LIMIT_MARGIN_RAD),
+                    upper - JOINT_LIMIT_MARGIN_RAD,
+                )
+            )
+        return clamped
 
     def _publish_feedback(
         self,
@@ -300,8 +346,9 @@ class IsaacSimTrajectoryExecutor:
         final_point: JointTrajectoryPoint,
     ) -> bool:
         actual = self._actual_point(active)
+        final_positions = self._clamped_positions(active.joint_names, final_point.positions)
         for index in range(len(active.joint_names)):
-            position_error = abs(actual.positions[index] - final_point.positions[index])
+            position_error = abs(actual.positions[index] - final_positions[index])
             velocity = abs(actual.velocities[index]) if actual.velocities else 0.0
             if position_error > DEFAULT_GOAL_POSITION_TOLERANCE:
                 return False
@@ -315,11 +362,12 @@ class IsaacSimTrajectoryExecutor:
         final_point: JointTrajectoryPoint,
     ) -> str:
         actual = self._actual_point(active)
+        final_positions = self._clamped_positions(active.joint_names, final_point.positions)
         errors = []
         for index, joint_name in enumerate(active.joint_names):
             errors.append(
                 f"{joint_name}: position_error="
-                f"{actual.positions[index] - final_point.positions[index]:.4f}, "
+                f"{actual.positions[index] - final_positions[index]:.4f}, "
                 f"velocity={actual.velocities[index]:.4f}"
             )
         return "; ".join(errors)

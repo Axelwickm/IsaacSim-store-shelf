@@ -35,6 +35,7 @@ Visualization Manager:
       Name: cuMotion Robot Spheres
       Namespaces:
         cumotion_robot_spheres: true
+        cumotion_labels: true
       Queue Size: 10
       Value: true
     - Class: rviz_default_plugins/MarkerArray
@@ -59,6 +60,55 @@ Visualization Manager:
       Name: cuMotion Voxels
       Queue Size: 10
       Value: true
+    - Class: moveit_rviz_plugin/MotionPlanning
+      Enabled: false
+      Name: MotionPlanning
+      Move Group Namespace: ""
+      Planning Scene Topic: /monitored_planning_scene
+      Robot Description: robot_description
+      Scene Geometry:
+        Scene Alpha: 1
+        Scene Color: 50; 230; 50
+        Scene Display Time: 0.2
+        Show Scene Geometry: true
+        Voxel Coloring: Z-Axis
+        Voxel Rendering: Occupied Voxels
+      Planned Path:
+        Trajectory Topic:
+          Depth: 10
+          Durability Policy: Volatile
+          History Policy: Keep Last
+          Reliability Policy: Reliable
+          Value: /moveit/display_planned_path
+        Loop Animation: false
+        Robot Alpha: 0.5
+        Show Robot Collision: false
+        Show Robot Visual: true
+        Show Trail: true
+        State Display Time: 0.05 s
+      Planning Metrics:
+        Payload: 1
+        Show Joint Torques: false
+        Show Manipulability: false
+        Show Manipulability Index: false
+        Show Weight Limit: false
+        TextHeight: 0.08
+      Planning Request:
+        Planning Group: right_arm
+        Query Goal State: true
+        Query Start State: false
+        Show Workspace: false
+      Planning Attempt: 1
+      Use Sim Time: true
+      Workspace:
+        Center:
+          X: 0
+          Y: 0
+          Z: 0
+        Size:
+          X: 2
+          Y: 2
+          Z: 2
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
