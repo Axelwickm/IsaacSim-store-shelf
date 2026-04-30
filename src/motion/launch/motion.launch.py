@@ -7,6 +7,7 @@ from launch_ros.actions import Node
 
 def generate_launch_description() -> LaunchDescription:
     planning_group = LaunchConfiguration("planning_group")
+    planning_arm_side = LaunchConfiguration("planning_arm_side")
     pipeline_id = LaunchConfiguration("pipeline_id")
     planner_id = LaunchConfiguration("planner_id")
     target_pose_topic = LaunchConfiguration("target_pose_topic")
@@ -28,6 +29,11 @@ def generate_launch_description() -> LaunchDescription:
                 "planning_group",
                 default_value="yumi_arm",
                 description="MoveIt planning group to use.",
+            ),
+            DeclareLaunchArgument(
+                "planning_arm_side",
+                default_value="right",
+                description="Which arm is actively being planned: left or right.",
             ),
             DeclareLaunchArgument(
                 "pipeline_id",
@@ -89,6 +95,7 @@ def generate_launch_description() -> LaunchDescription:
                 parameters=[
                     {
                         "planning_group": planning_group,
+                        "planning_arm_side": planning_arm_side,
                         "pipeline_id": pipeline_id,
                         "planner_id": planner_id,
                         "target_pose_topic": target_pose_topic,
@@ -96,6 +103,8 @@ def generate_launch_description() -> LaunchDescription:
                         "move_group_result_timeout": move_group_result_timeout,
                         "direct_trajectory_result_timeout": direct_trajectory_result_timeout,
                         "direct_trajectory_goal_time_tolerance": direct_trajectory_goal_time_tolerance,
+                        "robot_xrdf": cumotion_robot_xrdf,
+                        "robot_urdf": cumotion_urdf_path,
                     }
                 ],
             ),

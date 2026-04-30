@@ -20,6 +20,7 @@ try:
     from control_msgs.action import FollowJointTrajectory
     from moveit_msgs.action import MoveGroup
     from moveit_msgs.msg import (
+        AllowedCollisionEntry,
         BoundingVolume,
         CollisionObject,
         Constraints,
@@ -37,6 +38,7 @@ try:
 
     MOVEIT_ACTIONS_AVAILABLE = True
 except ModuleNotFoundError:
+    AllowedCollisionEntry = None
     CollisionObject = None
     Duration = None
     FollowJointTrajectory = None
@@ -119,25 +121,59 @@ RELEASE_TARGET_ON_MOVEIT_ERROR_CODES = {
 
 MOVE_GROUP_SERVER_WAIT_SECONDS = 5.0
 MOVE_GROUP_SERVER_RETRY_SECONDS = 2.0
+_ARM_JOINT_LIMIT_BOUNDS = {
+    1: (-2.84, 2.84),
+    2: (-2.4, 0.65),
+    7: (-2.84, 2.84),
+    3: (-2.0, 1.29),
+    4: (-4.9, 4.9),
+    5: (-1.43, 2.3),
+    6: (-3.89, 3.89),
+}
 JOINT_POSITION_LIMITS = {
-    "yumi_joint_1_r": (-2.84, 2.84),
-    "yumi_joint_2_r": (-2.4, 0.65),
-    "yumi_joint_7_r": (-2.84, 2.84),
-    "yumi_joint_3_r": (-2.0, 1.29),
-    "yumi_joint_4_r": (-4.9, 4.9),
-    "yumi_joint_5_r": (-1.43, 2.3),
-    "yumi_joint_6_r": (-3.89, 3.89),
+    f"yumi_joint_{joint_index}_{arm_suffix}": limits
+    for arm_suffix in ("l", "r")
+    for joint_index, limits in _ARM_JOINT_LIMIT_BOUNDS.items()
 }
 JOINT_LIMIT_MARGIN_RAD = 1e-3
-RIGHT_ARM_JOINT_ORDER = (
-    "yumi_joint_1_r",
-    "yumi_joint_2_r",
-    "yumi_joint_7_r",
-    "yumi_joint_3_r",
-    "yumi_joint_4_r",
-    "yumi_joint_5_r",
-    "yumi_joint_6_r",
-)
+ARM_SIDE_CONFIGS = {
+    "left": {
+        "suffix": "l",
+        "joint_order": (
+            "yumi_joint_1_l",
+            "yumi_joint_2_l",
+            "yumi_joint_7_l",
+            "yumi_joint_3_l",
+            "yumi_joint_4_l",
+            "yumi_joint_5_l",
+            "yumi_joint_6_l",
+        ),
+        "gripper_joint": "gripper_l_joint",
+        "gripper_prefix": "gripper_l_",
+        "proxy_excluded_links": {
+            "yumi_link_1_r",
+            "yumi_link_2_r",
+        },
+    },
+    "right": {
+        "suffix": "r",
+        "joint_order": (
+            "yumi_joint_1_r",
+            "yumi_joint_2_r",
+            "yumi_joint_7_r",
+            "yumi_joint_3_r",
+            "yumi_joint_4_r",
+            "yumi_joint_5_r",
+            "yumi_joint_6_r",
+        ),
+        "gripper_joint": "gripper_r_joint",
+        "gripper_prefix": "gripper_r_",
+        "proxy_excluded_links": {
+            "yumi_link_1_l",
+            "yumi_link_2_l",
+        },
+    },
+}
 
 
 class MotionPlannerNode(Node):
@@ -145,6 +181,7 @@ class MotionPlannerNode(Node):
         super().__init__("motion_planner")
         self.declare_parameter("planning_group", "yumi_arm")
         self.declare_parameter("right_arm_group", "right_arm")
+        self.declare_parameter("planning_arm_side", "right")
         self.declare_parameter("end_effector_link", "gripper_r_grasp_frame")
         self.declare_parameter("moveit_target_frame", "yumi_body")
         self.declare_parameter("pipeline_id", "isaac_ros_cumotion")
@@ -217,6 +254,21 @@ class MotionPlannerNode(Node):
 
         planning_group = str(self.get_parameter("planning_group").value)
         self._right_arm_group = str(self.get_parameter("right_arm_group").value)
+        planning_arm_side = str(self.get_parameter("planning_arm_side").value).strip().lower()
+        if planning_arm_side not in ARM_SIDE_CONFIGS:
+            raise ValueError(
+                "planning_arm_side must be one of: "
+                + ", ".join(sorted(ARM_SIDE_CONFIGS))
+            )
+        self._planning_arm_side = planning_arm_side
+        self._planning_arm_config = ARM_SIDE_CONFIGS[self._planning_arm_side]
+        self._other_arm_side = "left" if self._planning_arm_side == "right" else "right"
+        self._other_arm_config = ARM_SIDE_CONFIGS[self._other_arm_side]
+        self._planning_joint_order = tuple(self._planning_arm_config["joint_order"])
+        self._planning_start_joints = self._planning_joint_order + (
+            str(self._planning_arm_config["gripper_joint"]),
+        )
+        self._move_group_name = self._right_arm_group
         self._end_effector_link = str(self.get_parameter("end_effector_link").value)
         self._moveit_target_frame = str(self.get_parameter("moveit_target_frame").value)
         pipeline_id = str(self.get_parameter("pipeline_id").value)
@@ -366,6 +418,7 @@ class MotionPlannerNode(Node):
         self._collision_sphere_links: list[str] = []
         self._collision_sphere_labels: list[str] = []
         self._collision_ignored_link_pairs: set[frozenset[str]] = set()
+        self._other_arm_proxy_links: set[str] = set()
         self._last_planned_collision_waypoint_index: int | None = None
         self._last_planned_collision_waypoint_joint_names: list[str] = []
         self._last_planned_collision_waypoint_positions: list[float] = []
@@ -458,7 +511,8 @@ class MotionPlannerNode(Node):
 
         self.get_logger().info(
             "Motion planner scaffold ready "
-            f"(group={planning_group}, right_arm={self._right_arm_group}, "
+            f"(group={planning_group}, move_group={self._move_group_name}, "
+            f"planning_arm_side={self._planning_arm_side}, "
             f"target_frame={self._moveit_target_frame}, "
             f"pipeline={pipeline_id}, planner={planner_id}, "
             f"direct_execute={not self._plan_only})"
@@ -906,7 +960,7 @@ class MotionPlannerNode(Node):
             raise RuntimeError(f"Cannot build MotionPlanRequest for {step.name!r} without pose.")
 
         request = MotionPlanRequest()
-        request.group_name = self._right_arm_group
+        request.group_name = self._move_group_name
         request.pipeline_id = self._pipeline_id
         request.planner_id = self._planner_id
         request.num_planning_attempts = self._num_planning_attempts
@@ -925,10 +979,195 @@ class MotionPlannerNode(Node):
         options.replan = False
         options.planning_scene_diff.is_diff = True
         options.planning_scene_diff.robot_state.is_diff = True
-        options.planning_scene_diff.world.collision_objects.extend(
-            self._build_other_arm_collision_objects()
-        )
+        collision_objects = self._build_other_arm_collision_objects()
+        if collision_objects:
+            self._log_other_arm_proxy_start_state_collisions(collision_objects)
+            options.planning_scene_diff.world.collision_objects.extend(collision_objects)
+            self._allow_other_arm_proxy_self_overlap(
+                options,
+                collision_objects,
+            )
         return options
+
+    def _is_planning_arm_link(self, link_name: str) -> bool:
+        suffix = str(self._planning_arm_config["suffix"])
+        if link_name.startswith("yumi_link_"):
+            return link_name.endswith(f"_{suffix}")
+        return link_name.startswith(str(self._planning_arm_config["gripper_prefix"]))
+
+    def _is_other_arm_link(self, link_name: str) -> bool:
+        suffix = str(self._other_arm_config["suffix"])
+        if link_name.startswith("yumi_link_"):
+            return link_name.endswith(f"_{suffix}")
+        return link_name.startswith(str(self._other_arm_config["gripper_prefix"]))
+
+    def _log_other_arm_proxy_start_state_collisions(
+        self,
+        collision_objects: list[Any],
+    ) -> None:
+        if self._latest_joint_state is None or not collision_objects:
+            return
+        try:
+            if self._collision_model is None or self._collision_tensor_args is None:
+                self._load_collision_model()
+        except Exception as error:
+            self.get_logger().warn(
+                f"Other-arm proxy start-state collision preflight unavailable: {error}",
+                throttle_duration_sec=5.0,
+            )
+            return
+
+        import torch
+
+        position_map = {
+            name: float(position)
+            for name, position in zip(
+                self._latest_joint_state.name,
+                self._latest_joint_state.position,
+                strict=False,
+            )
+        }
+        missing = [
+            joint_name
+            for joint_name in self._collision_joint_names
+            if joint_name not in position_map
+        ]
+        if missing:
+            self.get_logger().warn(
+                "Skipping other-arm proxy start-state collision preflight; missing joint state for "
+                + ", ".join(missing),
+                throttle_duration_sec=5.0,
+            )
+            return
+
+        q = torch.tensor(
+            [[position_map[joint_name] for joint_name in self._collision_joint_names]],
+            device=self._collision_tensor_args.device,
+            dtype=self._collision_tensor_args.dtype,
+        )
+        spheres = (
+            self._collision_model.get_state(q)
+            .link_spheres_tensor[0]
+            .detach()
+            .cpu()
+            .numpy()
+        )
+
+        planning_arm_spheres = []
+        for index, sphere_values in enumerate(spheres):
+            link_name = self._collision_sphere_links[index]
+            if link_name != "yumi_body" and not self._is_planning_arm_link(link_name):
+                continue
+            x, y, z, radius = [float(value) for value in sphere_values]
+            if radius <= 0.0:
+                continue
+            planning_arm_spheres.append(
+                (
+                    self._collision_sphere_labels[index],
+                    x,
+                    y,
+                    z,
+                    radius,
+                )
+            )
+
+        proxy_spheres = []
+        for collision_object in collision_objects:
+            primitive = collision_object.primitives[0]
+            pose = collision_object.primitive_poses[0]
+            radius = float(primitive.dimensions[0])
+            proxy_spheres.append(
+                (
+                    str(collision_object.id),
+                    float(pose.position.x),
+                    float(pose.position.y),
+                    float(pose.position.z),
+                    radius,
+                )
+            )
+
+        overlaps: list[tuple[float, str, str, float, float]] = []
+        for planning_label, planning_x, planning_y, planning_z, planning_radius in planning_arm_spheres:
+            for proxy_id, proxy_x, proxy_y, proxy_z, proxy_radius in proxy_spheres:
+                dx = planning_x - proxy_x
+                dy = planning_y - proxy_y
+                dz = planning_z - proxy_z
+                distance = (dx * dx + dy * dy + dz * dz) ** 0.5
+                radius_sum = planning_radius + proxy_radius
+                penetration = radius_sum - distance
+                if penetration > 0.0:
+                    overlaps.append(
+                        (
+                            penetration,
+                            planning_label,
+                            proxy_id,
+                            distance,
+                            radius_sum,
+                        )
+                    )
+        overlaps.sort(reverse=True)
+        if not overlaps:
+            self.get_logger().info(
+                "Other-arm proxy start-state collision preflight: no planning-arm/proxy overlaps."
+            )
+            return
+        penetration, planning_label, proxy_id, distance, radius_sum = overlaps[0]
+        self.get_logger().warn(
+            "Other-arm proxy start-state collision preflight: "
+            f"{len(overlaps)} planning-arm/proxy overlaps. "
+            f"Worst: {planning_label} <-> {proxy_id} "
+            f"penetration={penetration:.4f}m distance={distance:.4f}m "
+            f"radius_sum={radius_sum:.4f}m."
+        )
+
+    def _allow_other_arm_proxy_self_overlap(
+        self,
+        options: Any,
+        collision_objects: list[Any],
+    ) -> None:
+        if AllowedCollisionEntry is None or not collision_objects:
+            return
+        acm = options.planning_scene_diff.allowed_collision_matrix
+        acm.entry_names = list(acm.entry_names)
+        acm.entry_values = list(acm.entry_values)
+
+        proxy_ids = [str(collision_object.id) for collision_object in collision_objects]
+        link_names = sorted(self._other_arm_proxy_links)
+        if not proxy_ids or not link_names:
+            return
+
+        existing_names = list(acm.entry_names)
+        name_to_index = {name: index for index, name in enumerate(existing_names)}
+
+        def ensure_name(name: str) -> int:
+            index = name_to_index.get(name)
+            if index is not None:
+                return index
+            new_size = len(existing_names) + 1
+            for entry in acm.entry_values:
+                enabled = list(entry.enabled)
+                enabled.append(False)
+                entry.enabled = enabled
+            new_entry = AllowedCollisionEntry()
+            new_entry.enabled = [False] * new_size
+            acm.entry_values.append(new_entry)
+            existing_names.append(name)
+            acm.entry_names.append(name)
+            index = new_size - 1
+            name_to_index[name] = index
+            return index
+
+        for link_name in link_names:
+            ensure_name(link_name)
+        for proxy_id in proxy_ids:
+            ensure_name(proxy_id)
+
+        for link_name in link_names:
+            link_index = name_to_index[link_name]
+            for proxy_id in proxy_ids:
+                proxy_index = name_to_index[proxy_id]
+                acm.entry_values[link_index].enabled[proxy_index] = True
+                acm.entry_values[proxy_index].enabled[link_index] = True
 
     def _build_other_arm_collision_objects(self) -> list[Any]:
         if (
@@ -983,10 +1222,14 @@ class MotionPlannerNode(Node):
             .numpy()
         )
         collision_objects = []
+        self._other_arm_proxy_links = set()
         for index, sphere_values in enumerate(spheres):
             link_name = self._collision_sphere_links[index]
-            if not (link_name.endswith("_l") or link_name.startswith("gripper_l_")):
+            if not self._is_other_arm_link(link_name):
                 continue
+            if link_name in self._other_arm_config["proxy_excluded_links"]:
+                continue
+            self._other_arm_proxy_links.add(link_name)
             x, y, z, radius = [float(value) for value in sphere_values]
             if radius <= 0.0:
                 continue
@@ -1045,7 +1288,16 @@ class MotionPlannerNode(Node):
             raise RuntimeError("Cannot build MoveGroup start_state without /joint_states.")
         start_state = RobotState()
         start_state.is_diff = False
-        start_state.joint_state = deepcopy(self._latest_joint_state)
+        latest = self._latest_joint_state
+        filtered_joint_state = JointState()
+        filtered_joint_state.header = deepcopy(latest.header)
+        allowed_names = set(self._planning_start_joints)
+        for name, position in zip(latest.name, latest.position, strict=False):
+            if name not in allowed_names:
+                continue
+            filtered_joint_state.name.append(name)
+            filtered_joint_state.position.append(position)
+        start_state.joint_state = filtered_joint_state
         self._clamp_start_state_to_joint_limits(start_state.joint_state)
         return start_state
 
@@ -2001,7 +2253,7 @@ class MotionPlannerNode(Node):
             }
         start_state_summary = self._joint_state_summary(
             request.start_state.joint_state,
-            RIGHT_ARM_JOINT_ORDER,
+            self._planning_joint_order,
         )
         orientation_data: dict[str, Any] = {"enabled": False}
         if request.goal_constraints:
@@ -2062,7 +2314,7 @@ class MotionPlannerNode(Node):
             "orientation_constraint": orientation_data,
             "start_state": self._joint_state_dict(
                 request.start_state.joint_state,
-                RIGHT_ARM_JOINT_ORDER,
+                self._planning_joint_order,
             ),
             "summary": summary,
         }
