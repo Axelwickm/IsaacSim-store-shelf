@@ -68,14 +68,24 @@ def generate_launch_description() -> LaunchDescription:
                 description="Whether to launch RViz for MoveIt and cuMotion debug markers.",
             ),
             DeclareLaunchArgument(
-                "cumotion_robot_xrdf",
-                default_value="/workspace/usd/robot/yumi_isaacsim.xrdf",
-                description="XRDF file for the standalone cuMotion planner node.",
+                "right_cumotion_robot_xrdf",
+                default_value="/workspace/usd/robot/yumi_isaacsim_right_arm.xrdf",
+                description="XRDF file for the right-arm standalone cuMotion planner node.",
             ),
             DeclareLaunchArgument(
-                "cumotion_urdf_path",
-                default_value="/workspace/usd/robot/yumi_isaacsim.urdf",
-                description="URDF file for the standalone cuMotion planner node.",
+                "right_cumotion_urdf_path",
+                default_value="/workspace/usd/robot/yumi_isaacsim_right_arm.urdf",
+                description="URDF file for the right-arm standalone cuMotion planner node.",
+            ),
+            DeclareLaunchArgument(
+                "left_cumotion_robot_xrdf",
+                default_value="/workspace/usd/robot/yumi_isaacsim_left_arm.xrdf",
+                description="XRDF file for the left-arm standalone cuMotion planner node.",
+            ),
+            DeclareLaunchArgument(
+                "left_cumotion_urdf_path",
+                default_value="/workspace/usd/robot/yumi_isaacsim_left_arm.urdf",
+                description="URDF file for the left-arm standalone cuMotion planner node.",
             ),
             IncludeLaunchDescription(
                 PythonLaunchDescriptionSource(str(sim_launch)),
@@ -89,8 +99,18 @@ def generate_launch_description() -> LaunchDescription:
                     "move_group_delay": LaunchConfiguration("move_group_delay"),
                     "move_group_log_level": LaunchConfiguration("move_group_log_level"),
                     "use_moveit_rviz": LaunchConfiguration("use_moveit_rviz"),
-                    "cumotion_robot_xrdf": LaunchConfiguration("cumotion_robot_xrdf"),
-                    "cumotion_urdf_path": LaunchConfiguration("cumotion_urdf_path"),
+                    "right_planning_cumotion_robot_xrdf": LaunchConfiguration(
+                        "right_cumotion_robot_xrdf"
+                    ),
+                    "right_planning_cumotion_urdf_path": LaunchConfiguration(
+                        "right_cumotion_urdf_path"
+                    ),
+                    "left_planning_cumotion_robot_xrdf": LaunchConfiguration(
+                        "left_cumotion_robot_xrdf"
+                    ),
+                    "left_planning_cumotion_urdf_path": LaunchConfiguration(
+                        "left_cumotion_urdf_path"
+                    ),
                 }.items(),
             ),
             IncludeLaunchDescription(
@@ -110,8 +130,19 @@ def generate_launch_description() -> LaunchDescription:
                 launch_arguments={
                     "pipeline_id": LaunchConfiguration("motion_pipeline_id"),
                     "planner_id": LaunchConfiguration("motion_planner_id"),
-                    "cumotion_robot_xrdf": LaunchConfiguration("cumotion_robot_xrdf"),
-                    "cumotion_urdf_path": LaunchConfiguration("cumotion_urdf_path"),
+                    "right_cumotion_robot_xrdf": LaunchConfiguration(
+                        "right_cumotion_robot_xrdf"
+                    ),
+                    "right_cumotion_urdf_path": LaunchConfiguration(
+                        "right_cumotion_urdf_path"
+                    ),
+                    "left_cumotion_robot_xrdf": LaunchConfiguration(
+                        "left_cumotion_robot_xrdf"
+                    ),
+                    "left_cumotion_urdf_path": LaunchConfiguration(
+                        "left_cumotion_urdf_path"
+                    ),
+                    "launch_left_planner": "true",
                 }.items(),
             ),
         ]

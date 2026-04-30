@@ -18,21 +18,33 @@
   <xacro:arg name="use_ros2_control" default="false"/>
   <xacro:arg name="joint_states_topic" default="/isaac_joint_states"/>
   <xacro:arg name="joint_commands_topic" default="/joint_command"/>
+  <xacro:arg name="include_right_arm" default="true"/>
+  <xacro:arg name="include_left_arm" default="true"/>
+  <xacro:arg name="include_right_gripper" default="true"/>
+  <xacro:arg name="include_left_gripper" default="true"/>
 
   <!--yumi-->
-  <xacro:yumi name="yumi" hardware_interface="hardware_interface/$(arg arms_interface)">
+  <xacro:yumi
+    name="yumi"
+    hardware_interface="hardware_interface/$(arg arms_interface)"
+    include_right_arm="$(arg include_right_arm)"
+    include_left_arm="$(arg include_left_arm)">
     <origin xyz="0 0 0" rpy="0 0 0" />
   </xacro:yumi>
 
   <!--right gripper-->
-  <xacro:yumi_servo_gripper name="gripper_r" hardware_interface="hardware_interface/$(arg grippers_interface)" parent="yumi_link_7_r">
-    <origin xyz="0 0 0.007" rpy="0 0 ${PI}" />
-  </xacro:yumi_servo_gripper>
+  <xacro:if value="$(arg include_right_gripper)">
+    <xacro:yumi_servo_gripper name="gripper_r" hardware_interface="hardware_interface/$(arg grippers_interface)" parent="yumi_link_7_r">
+      <origin xyz="0 0 0.007" rpy="0 0 ${PI}" />
+    </xacro:yumi_servo_gripper>
+  </xacro:if>
 
   <!--left gripper-->
-  <xacro:yumi_servo_gripper name="gripper_l" hardware_interface="hardware_interface/$(arg grippers_interface)" parent="yumi_link_7_l">
-    <origin xyz="0 0 0.007" rpy="0 0 ${PI}" />
-  </xacro:yumi_servo_gripper>
+  <xacro:if value="$(arg include_left_gripper)">
+    <xacro:yumi_servo_gripper name="gripper_l" hardware_interface="hardware_interface/$(arg grippers_interface)" parent="yumi_link_7_l">
+      <origin xyz="0 0 0.007" rpy="0 0 ${PI}" />
+    </xacro:yumi_servo_gripper>
+  </xacro:if>
 
   <xacro:if value="$(arg use_ros2_control)">
     <xacro:yumi_ros2_control

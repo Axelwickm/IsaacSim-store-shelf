@@ -11,7 +11,7 @@ ITEMS_PRIM_NAME = "all_items"
 CART_PRIM_NAME = "Cart"
 SHELF_PRIM_NAME = "Shelf"
 COLLIDERS_PRIM_NAME = "colliders"
-DEFAULT_CART_Y = -1.0
+DEFAULT_CART_Y = -0.8
 DEFAULT_ROBOT_RELATIVE_X = 0.1
 VISION_CAMERA_LINK_PRIM_NAME = "vision_camera_link"
 VISION_CAMERA_OPTICAL_FRAME_PRIM_NAME = "vision_camera_optical_frame"
@@ -953,9 +953,15 @@ def construct_scene(configuration: str) -> dict:
     if cart_prim is None:
         raise RuntimeError("Could not find Cart prim in loaded scene")
     cart_translation = prim_local_translation(cart_prim)
+    cart_y = float_env("ISAACSIM_CART_Y", DEFAULT_CART_Y)
     set_prim_local_translation(
         cart_prim,
-        (cart_translation[0], DEFAULT_CART_Y, cart_translation[2]),
+        (cart_translation[0], cart_y, cart_translation[2]),
+    )
+    print(
+        f"[store_shelf] Positioned cart at y={cart_y:.3f}m "
+        f"(default={DEFAULT_CART_Y:.3f}m)",
+        flush=True,
     )
 
     robot_prim_path = add_robot_at_cart_origin(stage, robot_path)

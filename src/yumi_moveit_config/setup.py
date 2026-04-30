@@ -30,6 +30,7 @@ setup(
     entry_points={
         "console_scripts": [
             "static_planning_scene = yumi_moveit_config.static_planning_scene:main",
+            "static_planning_scene_server = yumi_moveit_config.static_planning_scene_server:main",
         ],
     },
 )

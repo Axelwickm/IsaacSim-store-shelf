@@ -7,7 +7,8 @@ from launch_ros.actions import Node
 
 def generate_launch_description() -> LaunchDescription:
     planning_group = LaunchConfiguration("planning_group")
-    planning_arm_side = LaunchConfiguration("planning_arm_side")
+    launch_right_planner = LaunchConfiguration("launch_right_planner")
+    launch_left_planner = LaunchConfiguration("launch_left_planner")
     pipeline_id = LaunchConfiguration("pipeline_id")
     planner_id = LaunchConfiguration("planner_id")
     target_pose_topic = LaunchConfiguration("target_pose_topic")
@@ -19,9 +20,13 @@ def generate_launch_description() -> LaunchDescription:
     direct_trajectory_goal_time_tolerance = LaunchConfiguration(
         "direct_trajectory_goal_time_tolerance"
     )
+    arm_state_topic = LaunchConfiguration("arm_state_topic")
+    coordinator_state_topic = LaunchConfiguration("coordinator_state_topic")
     publish_cumotion_spheres = LaunchConfiguration("publish_cumotion_spheres")
-    cumotion_robot_xrdf = LaunchConfiguration("cumotion_robot_xrdf")
-    cumotion_urdf_path = LaunchConfiguration("cumotion_urdf_path")
+    right_cumotion_robot_xrdf = LaunchConfiguration("right_cumotion_robot_xrdf")
+    right_cumotion_urdf_path = LaunchConfiguration("right_cumotion_urdf_path")
+    left_cumotion_robot_xrdf = LaunchConfiguration("left_cumotion_robot_xrdf")
+    left_cumotion_urdf_path = LaunchConfiguration("left_cumotion_urdf_path")
 
     return LaunchDescription(
         [
@@ -31,9 +36,14 @@ def generate_launch_description() -> LaunchDescription:
                 description="MoveIt planning group to use.",
             ),
             DeclareLaunchArgument(
-                "planning_arm_side",
-                default_value="right",
-                description="Which arm is actively being planned: left or right.",
+                "launch_right_planner",
+                default_value="true",
+                description="Whether to launch the right-arm planner node.",
+            ),
+            DeclareLaunchArgument(
+                "launch_left_planner",
+                default_value="true",
+                description="Whether to launch the left-arm planner node.",
             ),
             DeclareLaunchArgument(
                 "pipeline_id",
@@ -73,38 +83,103 @@ def generate_launch_description() -> LaunchDescription:
                 description="Goal time tolerance sent to the direct trajectory executor.",
             ),
             DeclareLaunchArgument(
+                "arm_state_topic",
+                default_value="/motion/arm_state",
+                description="Topic used by arm planners to publish local coordination state.",
+            ),
+            DeclareLaunchArgument(
+                "coordinator_state_topic",
+                default_value="/motion/coordinator_state",
+                description="Topic used by the coordinator to publish arbitration state.",
+            ),
+            DeclareLaunchArgument(
                 "publish_cumotion_spheres",
                 default_value="true",
                 description="Publish cuMotion robot collision spheres for RViz debugging.",
             ),
             DeclareLaunchArgument(
-                "cumotion_robot_xrdf",
-                default_value="/workspace/usd/robot/yumi_isaacsim.xrdf",
-                description="XRDF used to compute cuMotion robot collision spheres.",
+                "right_cumotion_robot_xrdf",
+                default_value="/workspace/usd/robot/yumi_isaacsim_right_arm.xrdf",
+                description="Right-arm XRDF used by the motion planner collision model.",
             ),
             DeclareLaunchArgument(
-                "cumotion_urdf_path",
-                default_value="/workspace/usd/robot/yumi_isaacsim.urdf",
-                description="URDF used to compute cuMotion robot collision spheres.",
+                "right_cumotion_urdf_path",
+                default_value="/workspace/usd/robot/yumi_isaacsim_right_arm.urdf",
+                description="Right-arm URDF used by the motion planner collision model.",
+            ),
+            DeclareLaunchArgument(
+                "left_cumotion_robot_xrdf",
+                default_value="/workspace/usd/robot/yumi_isaacsim_left_arm.xrdf",
+                description="Left-arm XRDF used by the motion planner collision model.",
+            ),
+            DeclareLaunchArgument(
+                "left_cumotion_urdf_path",
+                default_value="/workspace/usd/robot/yumi_isaacsim_left_arm.urdf",
+                description="Left-arm URDF used by the motion planner collision model.",
             ),
             Node(
                 package="motion",
+                executable="coordinator",
+                name="motion_coordinator",
+                output="screen",
+                parameters=[
+                    {
+                        "arm_state_topic": arm_state_topic,
+                        "coordinator_state_topic": coordinator_state_topic,
+                    }
+                ],
+            ),
+            Node(
+                condition=IfCondition(launch_right_planner),
+                package="motion",
                 executable="planner",
-                name="motion_planner",
+                name="motion_planner_right",
                 output="screen",
                 parameters=[
                     {
                         "planning_group": planning_group,
-                        "planning_arm_side": planning_arm_side,
+                        "planning_arm_side": "right",
                         "pipeline_id": pipeline_id,
                         "planner_id": planner_id,
                         "target_pose_topic": target_pose_topic,
+                        "move_group_action": "/moveit_right/move_action",
+                        "planning_scene_service": "/moveit_right/get_planning_scene",
+                        "planning_scene_topic": "/moveit_right/planning_scene",
                         "plan_only": plan_only,
                         "move_group_result_timeout": move_group_result_timeout,
                         "direct_trajectory_result_timeout": direct_trajectory_result_timeout,
                         "direct_trajectory_goal_time_tolerance": direct_trajectory_goal_time_tolerance,
-                        "robot_xrdf": cumotion_robot_xrdf,
-                        "robot_urdf": cumotion_urdf_path,
+                        "arm_state_topic": arm_state_topic,
+                        "coordinator_state_topic": coordinator_state_topic,
+                        "robot_xrdf": right_cumotion_robot_xrdf,
+                        "robot_urdf": right_cumotion_urdf_path,
+                    }
+                ],
+            ),
+            Node(
+                condition=IfCondition(launch_left_planner),
+                package="motion",
+                executable="planner",
+                name="motion_planner_left",
+                output="screen",
+                parameters=[
+                    {
+                        "planning_group": planning_group,
+                        "planning_arm_side": "left",
+                        "pipeline_id": pipeline_id,
+                        "planner_id": planner_id,
+                        "target_pose_topic": target_pose_topic,
+                        "move_group_action": "/moveit_left/move_action",
+                        "planning_scene_service": "/moveit_left/get_planning_scene",
+                        "planning_scene_topic": "/moveit_left/planning_scene",
+                        "plan_only": plan_only,
+                        "move_group_result_timeout": move_group_result_timeout,
+                        "direct_trajectory_result_timeout": direct_trajectory_result_timeout,
+                        "direct_trajectory_goal_time_tolerance": direct_trajectory_goal_time_tolerance,
+                        "arm_state_topic": arm_state_topic,
+                        "coordinator_state_topic": coordinator_state_topic,
+                        "robot_xrdf": left_cumotion_robot_xrdf,
+                        "robot_urdf": left_cumotion_urdf_path,
                     }
                 ],
             ),
@@ -126,8 +201,8 @@ def generate_launch_description() -> LaunchDescription:
                 output="screen",
                 parameters=[
                     {
-                        "robot_xrdf": cumotion_robot_xrdf,
-                        "urdf_path": cumotion_urdf_path,
+                        "robot_xrdf": right_cumotion_robot_xrdf,
+                        "urdf_path": right_cumotion_urdf_path,
                         "joint_states_topic": "/joint_states",
                         "marker_topic": "/cumotion/robot_spheres",
                         "frame_id": "yumi_body",

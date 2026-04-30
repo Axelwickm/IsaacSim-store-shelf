@@ -24,6 +24,7 @@ setup(
     entry_points={
         "console_scripts": [
             "planner = motion.planner:main",
+            "coordinator = motion.coordinator:main",
             "cumotion_sphere_publisher = motion.cumotion_sphere_publisher:main",
         ],
     },

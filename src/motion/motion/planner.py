@@ -13,7 +13,18 @@ from ament_index_python.packages import PackageNotFoundError, get_package_share_
 from geometry_msgs.msg import PointStamped, Pose, PoseStamped
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Empty
+from std_msgs.msg import Empty, String
+
+from .arm_config import JOINT_LIMIT_MARGIN_RAD, JOINT_POSITION_LIMITS, get_arm_side_config
+from .coordination import decode_payload, encode_payload
+from .occupancy import (
+    build_other_arm_collision_objects,
+    is_arm_link,
+    merged_position_map,
+    reserved_point_distance,
+    sample_peer_plan_point,
+    serialize_planned_trajectory,
+)
 
 try:
     from builtin_interfaces.msg import Duration
@@ -29,6 +40,7 @@ try:
         OrientationConstraint,
         PlanningSceneComponents,
         PlanningOptions,
+        PlanningScene,
         PositionConstraint,
         RobotState,
     )
@@ -121,83 +133,30 @@ RELEASE_TARGET_ON_MOVEIT_ERROR_CODES = {
 
 MOVE_GROUP_SERVER_WAIT_SECONDS = 5.0
 MOVE_GROUP_SERVER_RETRY_SECONDS = 2.0
-_ARM_JOINT_LIMIT_BOUNDS = {
-    1: (-2.84, 2.84),
-    2: (-2.4, 0.65),
-    7: (-2.84, 2.84),
-    3: (-2.0, 1.29),
-    4: (-4.9, 4.9),
-    5: (-1.43, 2.3),
-    6: (-3.89, 3.89),
-}
-JOINT_POSITION_LIMITS = {
-    f"yumi_joint_{joint_index}_{arm_suffix}": limits
-    for arm_suffix in ("l", "r")
-    for joint_index, limits in _ARM_JOINT_LIMIT_BOUNDS.items()
-}
-JOINT_LIMIT_MARGIN_RAD = 1e-3
-ARM_SIDE_CONFIGS = {
-    "left": {
-        "suffix": "l",
-        "joint_order": (
-            "yumi_joint_1_l",
-            "yumi_joint_2_l",
-            "yumi_joint_7_l",
-            "yumi_joint_3_l",
-            "yumi_joint_4_l",
-            "yumi_joint_5_l",
-            "yumi_joint_6_l",
-        ),
-        "gripper_joint": "gripper_l_joint",
-        "gripper_prefix": "gripper_l_",
-        "proxy_excluded_links": {
-            "yumi_link_1_r",
-            "yumi_link_2_r",
-        },
-    },
-    "right": {
-        "suffix": "r",
-        "joint_order": (
-            "yumi_joint_1_r",
-            "yumi_joint_2_r",
-            "yumi_joint_7_r",
-            "yumi_joint_3_r",
-            "yumi_joint_4_r",
-            "yumi_joint_5_r",
-            "yumi_joint_6_r",
-        ),
-        "gripper_joint": "gripper_r_joint",
-        "gripper_prefix": "gripper_r_",
-        "proxy_excluded_links": {
-            "yumi_link_1_l",
-            "yumi_link_2_l",
-        },
-    },
-}
 
 
 class MotionPlannerNode(Node):
     def __init__(self) -> None:
         super().__init__("motion_planner")
         self.declare_parameter("planning_group", "yumi_arm")
-        self.declare_parameter("right_arm_group", "right_arm")
+        self.declare_parameter("move_group_name", "")
         self.declare_parameter("planning_arm_side", "right")
-        self.declare_parameter("end_effector_link", "gripper_r_grasp_frame")
+        self.declare_parameter("end_effector_link", "")
         self.declare_parameter("moveit_target_frame", "yumi_body")
         self.declare_parameter("pipeline_id", "isaac_ros_cumotion")
         self.declare_parameter("planner_id", "cuMotion")
         self.declare_parameter("move_group_action", "/move_action")
         self.declare_parameter(
             "direct_trajectory_action",
-            "right_arm_controller/follow_joint_trajectory",
+            "",
         )
         self.declare_parameter("direct_trajectory_result_timeout", 30.0)
         self.declare_parameter("direct_trajectory_goal_time_tolerance", 30.0)
         self.declare_parameter("joint_command_topic", "/joint_command")
-        self.declare_parameter("right_gripper_joint", "gripper_r_joint")
-        self.declare_parameter("right_gripper_mimic_joint", "gripper_r_joint_m")
-        self.declare_parameter("right_gripper_open_position", 0.025)
-        self.declare_parameter("right_gripper_closed_position", 0.0)
+        self.declare_parameter("gripper_joint", "")
+        self.declare_parameter("gripper_mimic_joint", "")
+        self.declare_parameter("gripper_open_position", 0.025)
+        self.declare_parameter("gripper_closed_position", 0.0)
         self.declare_parameter("gripper_command_settle_seconds", 0.0)
         self.declare_parameter("target_pose_topic", "/motion/target_pose")
         self.declare_parameter("selected_item_point_topic", "/vision/selected_item_point")
@@ -217,6 +176,8 @@ class MotionPlannerNode(Node):
         self.declare_parameter("grasp_offset_xyz", [0.0, 0.0, 0.0])
         self.declare_parameter("retract_offset_xyz", [0.0, 0.0, 0.20])
         self.declare_parameter("drop_position_xyz", [0.25, -0.14, 0.0])
+        self.declare_parameter("left_drop_position_xyz", [0.25, 0.14, 0.0])
+        self.declare_parameter("right_drop_position_xyz", [0.25, -0.14, 0.0])
         self.declare_parameter("position_tolerance", 0.025)
         self.declare_parameter("use_top_down_orientation_constraint", True)
         self.declare_parameter("top_down_orientation_xyzw", [0.0, 1.0, 0.0, 0.0])
@@ -230,11 +191,14 @@ class MotionPlannerNode(Node):
         self.declare_parameter("move_group_result_timeout", 30.0)
         self.declare_parameter("move_group_observability_interval", 5.0)
         self.declare_parameter("move_group_debug_dump_dir", "/tmp/motion_planner_debug")
+        self.declare_parameter("planning_scene_service", "/get_planning_scene")
+        self.declare_parameter("planning_scene_topic", "/planning_scene")
         self.declare_parameter("robot_xrdf", "/workspace/usd/robot/yumi_isaacsim.xrdf")
         self.declare_parameter("robot_urdf", "/workspace/usd/robot/yumi_isaacsim.urdf")
         self.declare_parameter("planned_trajectory_collision_diagnostic", True)
         self.declare_parameter("inject_other_arm_collision_objects", True)
-        self.declare_parameter("other_arm_collision_radius_padding", 0.005)
+        self.declare_parameter("other_arm_collision_radius_padding", 0.03)
+        self.declare_parameter("other_arm_sweep_sample_count", 8)
         self.declare_parameter(
             "required_planning_scene_object_ids",
             [
@@ -249,33 +213,48 @@ class MotionPlannerNode(Node):
         self.declare_parameter("num_planning_attempts", 5)
         self.declare_parameter("max_velocity_scaling_factor", 0.2)
         self.declare_parameter("max_acceleration_scaling_factor", 0.2)
+        self.declare_parameter("arm_state_topic", "/motion/arm_state")
+        self.declare_parameter("coordinator_state_topic", "/motion/coordinator_state")
+        self.declare_parameter("reservation_distance_threshold", 0.05)
+        self.declare_parameter("peer_plan_extra_horizon_seconds", 2.0)
+        self.declare_parameter("coordination_heartbeat_seconds", 1.0)
 
         self._validate_external_dependencies()
 
         planning_group = str(self.get_parameter("planning_group").value)
-        self._right_arm_group = str(self.get_parameter("right_arm_group").value)
         planning_arm_side = str(self.get_parameter("planning_arm_side").value).strip().lower()
-        if planning_arm_side not in ARM_SIDE_CONFIGS:
-            raise ValueError(
-                "planning_arm_side must be one of: "
-                + ", ".join(sorted(ARM_SIDE_CONFIGS))
-            )
         self._planning_arm_side = planning_arm_side
-        self._planning_arm_config = ARM_SIDE_CONFIGS[self._planning_arm_side]
+        self._planning_arm_config = get_arm_side_config(self._planning_arm_side)
         self._other_arm_side = "left" if self._planning_arm_side == "right" else "right"
-        self._other_arm_config = ARM_SIDE_CONFIGS[self._other_arm_side]
-        self._planning_joint_order = tuple(self._planning_arm_config["joint_order"])
-        self._planning_start_joints = self._planning_joint_order + (
-            str(self._planning_arm_config["gripper_joint"]),
+        self._other_arm_config = get_arm_side_config(self._other_arm_side)
+        self._planning_joint_order = self._planning_arm_config.joint_order
+        self._planning_start_joints = self._planning_arm_config.planning_start_joints
+        configured_move_group_name = str(self.get_parameter("move_group_name").value).strip()
+        self._move_group_name = (
+            configured_move_group_name
+            or self._planning_arm_config.move_group_name
         )
-        self._move_group_name = self._right_arm_group
-        self._end_effector_link = str(self.get_parameter("end_effector_link").value)
+        configured_end_effector_link = str(
+            self.get_parameter("end_effector_link").value
+        ).strip()
+        self._end_effector_link = (
+            configured_end_effector_link
+            or self._planning_arm_config.end_effector_link
+        )
         self._moveit_target_frame = str(self.get_parameter("moveit_target_frame").value)
         pipeline_id = str(self.get_parameter("pipeline_id").value)
         planner_id = str(self.get_parameter("planner_id").value)
         move_group_action = str(self.get_parameter("move_group_action").value)
-        direct_trajectory_action = str(
+        planning_scene_service = str(
+            self.get_parameter("planning_scene_service").value
+        )
+        planning_scene_topic = str(self.get_parameter("planning_scene_topic").value)
+        configured_direct_trajectory_action = str(
             self.get_parameter("direct_trajectory_action").value
+        ).strip()
+        direct_trajectory_action = (
+            configured_direct_trajectory_action
+            or self._planning_arm_config.direct_trajectory_action
         )
         joint_command_topic = str(self.get_parameter("joint_command_topic").value)
         target_pose_topic = str(self.get_parameter("target_pose_topic").value)
@@ -294,18 +273,37 @@ class MotionPlannerNode(Node):
         display_trajectory_topic = str(
             self.get_parameter("display_trajectory_topic").value
         )
-        self._right_gripper_joint = str(self.get_parameter("right_gripper_joint").value)
-        self._right_gripper_mimic_joint = str(
-            self.get_parameter("right_gripper_mimic_joint").value
+        configured_gripper_joint = str(self.get_parameter("gripper_joint").value).strip()
+        self._gripper_joint = (
+            configured_gripper_joint or self._planning_arm_config.gripper_joint
         )
-        self._right_gripper_open_position = float(
-            self.get_parameter("right_gripper_open_position").value
+        configured_gripper_mimic_joint = str(
+            self.get_parameter("gripper_mimic_joint").value
+        ).strip()
+        self._gripper_mimic_joint = (
+            configured_gripper_mimic_joint
+            or self._planning_arm_config.gripper_mimic_joint
         )
-        self._right_gripper_closed_position = float(
-            self.get_parameter("right_gripper_closed_position").value
+        self._gripper_open_position = float(
+            self.get_parameter("gripper_open_position").value
+        )
+        self._gripper_closed_position = float(
+            self.get_parameter("gripper_closed_position").value
         )
         self._gripper_command_settle_seconds = float(
             self.get_parameter("gripper_command_settle_seconds").value
+        )
+        self._arm_state_topic = str(self.get_parameter("arm_state_topic").value)
+        self._coordinator_state_topic = str(
+            self.get_parameter("coordinator_state_topic").value
+        )
+        self._reservation_distance_threshold = max(
+            float(self.get_parameter("reservation_distance_threshold").value),
+            0.0,
+        )
+        self._peer_plan_extra_horizon_seconds = max(
+            float(self.get_parameter("peer_plan_extra_horizon_seconds").value),
+            0.0,
         )
 
         self._latched_target_point: PointStamped | None = None
@@ -344,7 +342,7 @@ class MotionPlannerNode(Node):
         self._pregrasp_offset_xyz = self._float_list_parameter("pregrasp_offset_xyz", 3)
         self._grasp_offset_xyz = self._float_list_parameter("grasp_offset_xyz", 3)
         self._retract_offset_xyz = self._float_list_parameter("retract_offset_xyz", 3)
-        self._drop_position_xyz = self._float_list_parameter("drop_position_xyz", 3)
+        self._drop_position_xyz = self._drop_position_for_arm()
         self._position_tolerance = float(self.get_parameter("position_tolerance").value)
         self._use_top_down_orientation_constraint = bool(
             self.get_parameter("use_top_down_orientation_constraint").value
@@ -393,6 +391,10 @@ class MotionPlannerNode(Node):
             float(self.get_parameter("other_arm_collision_radius_padding").value),
             0.0,
         )
+        self._other_arm_sweep_sample_count = max(
+            int(self.get_parameter("other_arm_sweep_sample_count").value),
+            1,
+        )
         self._required_planning_scene_object_ids = {
             str(object_id)
             for object_id in self.get_parameter(
@@ -412,6 +414,10 @@ class MotionPlannerNode(Node):
         self._max_acceleration_scaling_factor = float(
             self.get_parameter("max_acceleration_scaling_factor").value
         )
+        self._coordination_heartbeat_seconds = max(
+            float(self.get_parameter("coordination_heartbeat_seconds").value),
+            0.1,
+        )
         self._collision_model = None
         self._collision_tensor_args = None
         self._collision_joint_names: list[str] = []
@@ -426,7 +432,12 @@ class MotionPlannerNode(Node):
         self._planning_scene_ready = not self._required_planning_scene_object_ids
         self._planning_scene_request_in_flight = False
         self._planning_scene_ready_logged = False
+        self._dynamic_collision_object_ids: set[str] = set()
         self._pending_pick_retry_timer: Any | None = None
+        self._coordinator_state: dict[str, Any] = {"planning_owner": None, "arms": {}}
+        self._current_plan_state: dict[str, Any] | None = None
+        self._planning_request_active = False
+        self._planning_request_stamp_ns = 0
         self._latched_target_point_publisher = self.create_publisher(
             PointStamped,
             latched_target_point_topic,
@@ -437,6 +448,18 @@ class MotionPlannerNode(Node):
             joint_command_topic,
             10,
         )
+        self._arm_state_publisher = self.create_publisher(
+            String,
+            self._arm_state_topic,
+            10,
+        )
+        self._planning_scene_diff_publisher = None
+        if MOVEIT_ACTIONS_AVAILABLE:
+            self._planning_scene_diff_publisher = self.create_publisher(
+                PlanningScene,
+                planning_scene_topic,
+                10,
+            )
         self._pregrasp_pose_publisher = self.create_publisher(
             PoseStamped,
             "/motion/pregrasp_pose",
@@ -475,7 +498,7 @@ class MotionPlannerNode(Node):
             )
             self._planning_scene_client = self.create_client(
                 GetPlanningScene,
-                "/get_planning_scene",
+                planning_scene_service,
             )
 
         self._target_pose_subscription = self.create_subscription(
@@ -508,6 +531,16 @@ class MotionPlannerNode(Node):
             self._handle_clear_latched_target,
             10,
         )
+        self._coordinator_state_subscription = self.create_subscription(
+            String,
+            self._coordinator_state_topic,
+            self._handle_coordinator_state,
+            10,
+        )
+        self._coordination_heartbeat_timer = self.create_timer(
+            self._coordination_heartbeat_seconds,
+            self._publish_coordination_heartbeat,
+        )
 
         self.get_logger().info(
             "Motion planner scaffold ready "
@@ -530,6 +563,10 @@ class MotionPlannerNode(Node):
             f"MoveGroup debug artifacts will be written under "
             f"{self._move_group_debug_dump_dir}"
         )
+        self.get_logger().info(
+            f"Arm state topic: {self._arm_state_topic}; "
+            f"coordinator state topic: {self._coordinator_state_topic}"
+        )
         if self._required_planning_scene_object_ids:
             self.get_logger().info(
                 "Will defer planning until MoveIt planning scene contains: "
@@ -540,6 +577,7 @@ class MotionPlannerNode(Node):
                 "moveit_msgs is not importable in this environment. The planner will "
                 "publish/latch grasp poses but cannot send MoveGroup execution goals here."
             )
+        self._publish_arm_state()
 
     def _validate_external_dependencies(self) -> None:
         missing = []
@@ -598,11 +636,19 @@ class MotionPlannerNode(Node):
     def _handle_selected_item_moveit_point(self, message: PointStamped) -> None:
         if self._latched_target_point is not None:
             return
+        if self._peer_has_reserved_point(message):
+            self.get_logger().info(
+                "Ignoring selected item point because the peer arm has already reserved "
+                "a nearby target."
+            )
+            return
 
         self._latched_target_point = deepcopy(
             self._latest_world_selected_item_point or message
         )
         self._pending_pick_point = deepcopy(message)
+        self._set_planning_request_active(True, publish=False)
+        self._publish_arm_state()
         self._latched_target_point_publisher.publish(self._latched_target_point)
         self.get_logger().info(
             "Latched selected item point for visualization in frame "
@@ -627,6 +673,7 @@ class MotionPlannerNode(Node):
         self._latched_target_point = None
         self._pending_pick_point = None
         self._abort_pick_sequence("clear requested")
+        self._publish_arm_state()
         self.get_logger().info(
             "Cleared latched target point at "
             f"({point.x:.3f}, {point.y:.3f}, {point.z:.3f})."
@@ -639,11 +686,92 @@ class MotionPlannerNode(Node):
         point = self._latched_target_point.point
         self._latched_target_point = None
         self._pending_pick_point = None
+        self._set_planning_request_active(False, publish=False)
+        self._publish_arm_state()
         self.get_logger().info(
             f"Released {reason} target at "
             f"({point.x:.3f}, {point.y:.3f}, {point.z:.3f}); "
             "waiting to latch the next selected item point."
         )
+
+    def _handle_coordinator_state(self, message: String) -> None:
+        payload = decode_payload(message)
+        if payload is None:
+            self.get_logger().warning(
+                "Ignoring invalid coordinator state payload.",
+                throttle_duration_sec=5.0,
+            )
+            return
+        self._coordinator_state = payload
+
+    def _publish_arm_state(self) -> None:
+        self._arm_state_publisher.publish(encode_payload(self._arm_state_payload()))
+
+    def _set_planning_request_active(self, active: bool, *, publish: bool = True) -> None:
+        if active:
+            if not self._planning_request_active:
+                self._planning_request_stamp_ns = int(
+                    self.get_clock().now().nanoseconds
+                )
+            self._planning_request_active = True
+        else:
+            self._planning_request_active = False
+            self._planning_request_stamp_ns = 0
+        if publish:
+            self._publish_arm_state()
+
+    def _publish_coordination_heartbeat(self) -> None:
+        if (
+            self._pending_pick_point is None
+            and not self._pick_in_progress
+            and self._latched_target_point is None
+            and self._current_plan_state is None
+        ):
+            return
+        self._publish_arm_state()
+
+    def _arm_state_payload(self) -> dict[str, Any]:
+        reservation = None
+        if self._latched_target_point is not None:
+            reservation = {
+                "frame_id": self._latched_target_point.header.frame_id,
+                "xyz": [
+                    float(self._latched_target_point.point.x),
+                    float(self._latched_target_point.point.y),
+                    float(self._latched_target_point.point.z),
+                ],
+            }
+        return {
+            "arm_side": self._planning_arm_side,
+            "stamp_ns": int(self.get_clock().now().nanoseconds),
+            "request_planning": bool(self._planning_request_active),
+            "request_stamp_ns": int(self._planning_request_stamp_ns),
+            "reserved_point": reservation,
+            "plan": self._current_plan_state,
+            "pick_in_progress": bool(self._pick_in_progress),
+        }
+
+    def _peer_state(self) -> dict[str, Any]:
+        arms = self._coordinator_state.get("arms")
+        if not isinstance(arms, dict):
+            return {}
+        peer_state = arms.get(self._other_arm_side)
+        return peer_state if isinstance(peer_state, dict) else {}
+
+    def _peer_has_reserved_point(self, point: PointStamped) -> bool:
+        peer_state = self._peer_state()
+        if not peer_state:
+            return False
+        distance = reserved_point_distance(
+            peer_state.get("reserved_point"),
+            point.header.frame_id,
+            (
+                float(point.point.x),
+                float(point.point.y),
+                float(point.point.z),
+            ),
+        )
+        return distance is not None and distance <= self._reservation_distance_threshold
 
     def _publish_grasp_debug_poses_in_moveit_frame(self, moveit_point: PointStamped) -> None:
         pregrasp_pose, grasp_pose, retract_pose, drop_pose = self._build_grasp_poses(
@@ -668,6 +796,13 @@ class MotionPlannerNode(Node):
         )
         self._set_top_down_orientation(drop_pose)
         return pregrasp_pose, grasp_pose, retract_pose, drop_pose
+
+    def _drop_position_for_arm(self) -> list[float]:
+        if self._planning_arm_side == "left":
+            return self._float_list_parameter("left_drop_position_xyz", 3)
+        if self._planning_arm_side == "right":
+            return self._float_list_parameter("right_drop_position_xyz", 3)
+        return self._float_list_parameter("drop_position_xyz", 3)
 
     def _pose_from_point_offset(
         self,
@@ -717,7 +852,7 @@ class MotionPlannerNode(Node):
         self._pick_sequence = [
             MotionStep("approach pregrasp", pose=pregrasp_pose),
             MotionStep("move to grasp", pose=grasp_pose),
-            MotionStep("close right gripper", gripper_closed=True),
+            MotionStep(f"close {self._planning_arm_side} gripper", gripper_closed=True),
             MotionStep("retract", pose=retract_pose),
             MotionStep(
                 "move to drop",
@@ -726,12 +861,15 @@ class MotionPlannerNode(Node):
                 top_down_tolerance_xyz=self._release_top_down_orientation_tolerance_xyz,
                 top_down_weight=self._release_top_down_orientation_weight,
             ),
-            MotionStep("open right gripper", gripper_closed=False),
+            MotionStep(f"open {self._planning_arm_side} gripper", gripper_closed=False),
         ]
         self._pick_sequence_index = 0
         self._pick_generation += 1
         self._pick_in_progress = True
-        self.get_logger().info("Starting fixed-scene right-arm pick sequence.")
+        self._publish_arm_state()
+        self.get_logger().info(
+            f"Starting fixed-scene {self._planning_arm_side}-arm pick sequence."
+        )
         self._execute_next_pick_step()
 
     def _abort_pick_sequence(self, reason: str) -> None:
@@ -759,7 +897,10 @@ class MotionPlannerNode(Node):
         self._active_move_request_summary = ""
         self._active_move_request_profile = {}
         self._active_move_started_monotonic = 0.0
+        self._current_plan_state = None
+        self._set_planning_request_active(False, publish=False)
         self._cancel_pending_pick_retry()
+        self._publish_arm_state()
 
     def _ensure_pick_prerequisites(self) -> None:
         if self._pending_pick_point is None or self._pick_in_progress:
@@ -796,6 +937,10 @@ class MotionPlannerNode(Node):
     def _retry_pending_pick_once(self) -> None:
         self._cancel_pending_pick_retry()
         self._ensure_pick_prerequisites()
+
+    def _has_planning_turn(self) -> bool:
+        planning_owner = self._coordinator_state.get("planning_owner")
+        return planning_owner == self._planning_arm_side
 
     def _request_planning_scene_readiness_check(self) -> None:
         if (
@@ -852,10 +997,10 @@ class MotionPlannerNode(Node):
         self._pick_sequence_index += 1
 
         if step.gripper_closed is not None:
-            self._publish_right_gripper_command(step.gripper_closed)
+            self._publish_gripper_command(step.gripper_closed)
             state = "closed" if step.gripper_closed else "opened"
             self.get_logger().info(
-                f"Marked right gripper {state}. "
+                f"Marked {self._planning_arm_side} gripper {state}. "
                 "Published direct joint command to Isaac Sim."
             )
             if self._gripper_command_settle_seconds <= 0.0:
@@ -897,6 +1042,13 @@ class MotionPlannerNode(Node):
                 )
                 self._retry_current_pick_step()
                 return
+        self._set_planning_request_active(True)
+        if not self._has_planning_turn():
+            self.get_logger().info(
+                "Planner turn is currently assigned to the peer arm; retrying current pick step."
+            )
+            self._retry_current_pick_step()
+            return
 
         goal = self._build_move_group_goal(step)
         request_id, request_profile = self._build_move_group_observability(step, goal)
@@ -941,6 +1093,7 @@ class MotionPlannerNode(Node):
 
     def _fail_pick_sequence(self) -> None:
         self._pick_in_progress = False
+        self._set_planning_request_active(False)
 
     def _build_move_group_goal(self, step: MotionStep) -> Any:
         if step.pose is None:
@@ -981,25 +1134,63 @@ class MotionPlannerNode(Node):
         options.planning_scene_diff.robot_state.is_diff = True
         collision_objects = self._build_other_arm_collision_objects()
         if collision_objects:
+            self._publish_dynamic_collision_scene(collision_objects)
             self._log_other_arm_proxy_start_state_collisions(collision_objects)
             options.planning_scene_diff.world.collision_objects.extend(collision_objects)
             self._allow_other_arm_proxy_self_overlap(
                 options,
                 collision_objects,
             )
+        else:
+            self._clear_dynamic_collision_scene()
         return options
 
+    def _publish_dynamic_collision_scene(self, collision_objects: list[Any]) -> None:
+        if self._planning_scene_diff_publisher is None or PlanningScene is None:
+            return
+        scene = PlanningScene()
+        scene.is_diff = True
+        remove_objects = []
+        current_ids = {str(collision_object.id) for collision_object in collision_objects}
+        for object_id in sorted(self._dynamic_collision_object_ids - current_ids):
+            remove_object = CollisionObject()
+            remove_object.header.frame_id = self._moveit_target_frame
+            remove_object.id = object_id
+            remove_object.operation = CollisionObject.REMOVE
+            remove_objects.append(remove_object)
+        scene.world.collision_objects = remove_objects + list(collision_objects)
+        self._dynamic_collision_object_ids = current_ids
+        self._planning_scene_diff_publisher.publish(scene)
+        self.get_logger().info(
+            f"Published {len(collision_objects)} dynamic other-arm collision objects "
+            f"to MoveIt planning scene.",
+            throttle_duration_sec=5.0,
+        )
+
+    def _clear_dynamic_collision_scene(self) -> None:
+        if (
+            self._planning_scene_diff_publisher is None
+            or PlanningScene is None
+            or CollisionObject is None
+            or not self._dynamic_collision_object_ids
+        ):
+            return
+        scene = PlanningScene()
+        scene.is_diff = True
+        for object_id in sorted(self._dynamic_collision_object_ids):
+            collision_object = CollisionObject()
+            collision_object.header.frame_id = self._moveit_target_frame
+            collision_object.id = object_id
+            collision_object.operation = CollisionObject.REMOVE
+            scene.world.collision_objects.append(collision_object)
+        self._dynamic_collision_object_ids = set()
+        self._planning_scene_diff_publisher.publish(scene)
+
     def _is_planning_arm_link(self, link_name: str) -> bool:
-        suffix = str(self._planning_arm_config["suffix"])
-        if link_name.startswith("yumi_link_"):
-            return link_name.endswith(f"_{suffix}")
-        return link_name.startswith(str(self._planning_arm_config["gripper_prefix"]))
+        return is_arm_link(link_name, self._planning_arm_config)
 
     def _is_other_arm_link(self, link_name: str) -> bool:
-        suffix = str(self._other_arm_config["suffix"])
-        if link_name.startswith("yumi_link_"):
-            return link_name.endswith(f"_{suffix}")
-        return link_name.startswith(str(self._other_arm_config["gripper_prefix"]))
+        return is_arm_link(link_name, self._other_arm_config)
 
     def _log_other_arm_proxy_start_state_collisions(
         self,
@@ -1019,14 +1210,7 @@ class MotionPlannerNode(Node):
 
         import torch
 
-        position_map = {
-            name: float(position)
-            for name, position in zip(
-                self._latest_joint_state.name,
-                self._latest_joint_state.position,
-                strict=False,
-            )
-        }
+        position_map = self._collision_position_map()
         missing = [
             joint_name
             for joint_name in self._collision_joint_names
@@ -1188,7 +1372,95 @@ class MotionPlannerNode(Node):
 
         import torch
 
-        position_map = {
+        collision_objects: list[Any] = []
+        proxy_links: set[str] = set()
+        for sample_index, position_map in enumerate(self._peer_sweep_position_maps()):
+            missing = [
+                joint_name
+                for joint_name in self._collision_joint_names
+                if joint_name not in position_map
+            ]
+            if missing:
+                self.get_logger().warn(
+                    "Skipping other-arm collision object injection; missing joint state for "
+                    + ", ".join(missing),
+                    throttle_duration_sec=5.0,
+                )
+                return []
+
+            q = torch.tensor(
+                [[position_map[joint_name] for joint_name in self._collision_joint_names]],
+                device=self._collision_tensor_args.device,
+                dtype=self._collision_tensor_args.dtype,
+            )
+            spheres = (
+                self._collision_model.get_state(q)
+                .link_spheres_tensor[0]
+                .detach()
+                .cpu()
+                .numpy()
+            )
+            sample_objects, sample_proxy_links = build_other_arm_collision_objects(
+                spheres=spheres,
+                sphere_links=self._collision_sphere_links,
+                other_arm_config=self._other_arm_config,
+                moveit_target_frame=self._moveit_target_frame,
+                radius_padding=self._other_arm_collision_radius_padding,
+                id_prefix=f"other_arm_sweep_{sample_index:02d}",
+            )
+            collision_objects.extend(sample_objects)
+            proxy_links.update(sample_proxy_links)
+        self._other_arm_proxy_links = proxy_links
+        if collision_objects:
+            self.get_logger().info(
+                f"Injected {len(collision_objects)} other-arm swept collision spheres "
+                f"from {self._other_arm_sweep_sample_count} configured samples "
+                f"(padding={self._other_arm_collision_radius_padding:.3f}m).",
+                throttle_duration_sec=5.0,
+            )
+        return collision_objects
+
+    def _peer_sweep_position_maps(self) -> list[dict[str, float]]:
+        current_positions = self._latest_joint_position_map()
+        peer_plan = self._peer_state().get("plan")
+        if not isinstance(peer_plan, dict):
+            return [current_positions]
+
+        joint_names = list(peer_plan.get("joint_names") or [])
+        points = list(peer_plan.get("points") or [])
+        published_ns = int(peer_plan.get("published_ns") or 0)
+        final_time = float(peer_plan.get("final_time") or 0.0)
+        if not joint_names or not points or published_ns <= 0:
+            return [current_positions]
+
+        now_ns = int(self.get_clock().now().nanoseconds)
+        elapsed = max(0.0, (now_ns - published_ns) * 1e-9)
+        if elapsed > final_time + self._peer_plan_extra_horizon_seconds:
+            return [current_positions]
+
+        sample_times = self._peer_sweep_sample_times(elapsed, final_time)
+        samples = []
+        for sample_time in sample_times:
+            sample = sample_peer_plan_point(points, sample_time)
+            positions = list(sample.get("positions") or [])
+            position_map = dict(current_positions)
+            position_map.update(
+                {
+                    joint_name: float(position)
+                    for joint_name, position in zip(
+                        joint_names,
+                        positions,
+                        strict=False,
+                    )
+                }
+            )
+            samples.append(position_map)
+        return samples or [current_positions]
+
+    def _latest_joint_position_map(self) -> dict[str, float]:
+        if self._latest_joint_state is None:
+            return {}
+        return {
             name: float(position)
             for name, position in zip(
                 self._latest_joint_state.name,
@@ -1196,63 +1468,13 @@ class MotionPlannerNode(Node):
                 strict=False,
             )
         }
-        missing = [
-            joint_name
-            for joint_name in self._collision_joint_names
-            if joint_name not in position_map
-        ]
-        if missing:
-            self.get_logger().warn(
-                "Skipping other-arm collision object injection; missing joint state for "
-                + ", ".join(missing),
-                throttle_duration_sec=5.0,
-            )
-            return []
 
-        q = torch.tensor(
-            [[position_map[joint_name] for joint_name in self._collision_joint_names]],
-            device=self._collision_tensor_args.device,
-            dtype=self._collision_tensor_args.dtype,
-        )
-        spheres = (
-            self._collision_model.get_state(q)
-            .link_spheres_tensor[0]
-            .detach()
-            .cpu()
-            .numpy()
-        )
-        collision_objects = []
-        self._other_arm_proxy_links = set()
-        for index, sphere_values in enumerate(spheres):
-            link_name = self._collision_sphere_links[index]
-            if not self._is_other_arm_link(link_name):
-                continue
-            if link_name in self._other_arm_config["proxy_excluded_links"]:
-                continue
-            self._other_arm_proxy_links.add(link_name)
-            x, y, z, radius = [float(value) for value in sphere_values]
-            if radius <= 0.0:
-                continue
-
-            primitive = SolidPrimitive()
-            primitive.type = SolidPrimitive.SPHERE
-            primitive.dimensions = [radius + self._other_arm_collision_radius_padding]
-
-            pose = Pose()
-            pose.position.x = x
-            pose.position.y = y
-            pose.position.z = z
-            pose.orientation.w = 1.0
-
-            collision_object = CollisionObject()
-            collision_object.header.frame_id = self._moveit_target_frame
-            collision_object.id = f"other_arm_sphere_{index}"
-            collision_object.operation = CollisionObject.ADD
-            collision_object.primitives.append(primitive)
-            collision_object.primitive_poses.append(pose)
-            collision_objects.append(collision_object)
-
-        return collision_objects
+    def _peer_sweep_sample_times(self, elapsed: float, final_time: float) -> list[float]:
+        if self._other_arm_sweep_sample_count <= 1 or final_time <= elapsed:
+            return [min(elapsed, final_time)]
+        count = self._other_arm_sweep_sample_count
+        span = final_time - elapsed
+        return [elapsed + span * index / (count - 1) for index in range(count)]
 
     def _build_direct_trajectory_goal(self, trajectory: Any) -> Any:
         goal = FollowJointTrajectory.Goal()
@@ -1268,17 +1490,17 @@ class MotionPlannerNode(Node):
         duration.nanosec = int((seconds - duration.sec) * 1e9)
         return duration
 
-    def _publish_right_gripper_command(self, closed: bool) -> None:
+    def _publish_gripper_command(self, closed: bool) -> None:
         joint_command = JointState()
         joint_command.header.stamp = self.get_clock().now().to_msg()
         joint_command.name = [
-            self._right_gripper_joint,
-            self._right_gripper_mimic_joint,
+            self._gripper_joint,
+            self._gripper_mimic_joint,
         ]
         position = (
-            self._right_gripper_closed_position
+            self._gripper_closed_position
             if closed
-            else self._right_gripper_open_position
+            else self._gripper_open_position
         )
         joint_command.position = [position, position]
         self._joint_command_publisher.publish(joint_command)
@@ -1318,7 +1540,7 @@ class MotionPlannerNode(Node):
 
         pose = step.pose
         constraints = Constraints()
-        constraints.name = "right_arm_grasp_pose"
+        constraints.name = f"{self._planning_arm_side}_arm_grasp_pose"
 
         position_constraint = PositionConstraint()
         position_constraint.header = pose.header
@@ -1386,6 +1608,7 @@ class MotionPlannerNode(Node):
                     },
                 )
                 self._pick_in_progress = False
+                self._set_planning_request_active(False)
                 # self._release_latched_target("failed MoveGroup goal response")
             return
         if not goal_handle.accepted:
@@ -1399,6 +1622,7 @@ class MotionPlannerNode(Node):
                 },
             )
             self._pick_in_progress = False
+            self._set_planning_request_active(False)
             # self._release_latched_target("rejected MoveGroup goal")
             return
 
@@ -1473,6 +1697,7 @@ class MotionPlannerNode(Node):
                 },
             )
             self._pick_in_progress = False
+            self._set_planning_request_active(False)
             # self._release_latched_target("failed MoveGroup result")
             return
         action_status = getattr(action_result, "status", None)
@@ -1518,6 +1743,7 @@ class MotionPlannerNode(Node):
                 },
             )
             self._pick_in_progress = False
+            self._set_planning_request_active(False)
             self._clear_active_move_observability()
             if error_code in RELEASE_TARGET_ON_MOVEIT_ERROR_CODES:
                 self._release_latched_target("failed MoveGroup plan")
@@ -1536,6 +1762,9 @@ class MotionPlannerNode(Node):
             )
         self._publish_display_trajectory(planned_trajectory)
         self._log_planned_trajectory_collisions(step, planned_trajectory)
+        self._current_plan_state = self._planned_trajectory_state(planned_trajectory)
+        self._set_planning_request_active(False, publish=False)
+        self._publish_arm_state()
         self._write_move_group_debug_artifact(
             self._active_move_request_id,
             "succeeded",
@@ -1561,6 +1790,7 @@ class MotionPlannerNode(Node):
                 f"MoveGroup returned no planned trajectory for pick step {step.name!r}."
             )
             self._pick_in_progress = False
+            self._set_planning_request_active(False)
             self._clear_active_move_observability()
             self._release_latched_target("empty MoveGroup plan")
             return
@@ -1581,6 +1811,20 @@ class MotionPlannerNode(Node):
             display.trajectory_start = RobotState()
         display.trajectory.append(deepcopy(planned_trajectory))
         self._display_trajectory_publisher.publish(display)
+
+    def _planned_trajectory_state(self, planned_trajectory: Any | None) -> dict[str, Any] | None:
+        return serialize_planned_trajectory(
+            planned_trajectory,
+            int(self.get_clock().now().nanoseconds),
+        )
+
+    def _collision_position_map(self) -> dict[str, float]:
+        return merged_position_map(
+            self._latest_joint_state,
+            self._peer_state().get("plan"),
+            int(self.get_clock().now().nanoseconds),
+            self._peer_plan_extra_horizon_seconds,
+        )
 
     def _load_collision_model(self) -> None:
         from curobo.cuda_robot_model.cuda_robot_generator import CudaRobotGeneratorConfig
@@ -2075,6 +2319,8 @@ class MotionPlannerNode(Node):
                 "error_code": error_code,
             },
         )
+        self._current_plan_state = None
+        self._publish_arm_state()
         self._clear_direct_trajectory_observability()
         self._execute_next_pick_step()
 
@@ -2157,6 +2403,8 @@ class MotionPlannerNode(Node):
             self._move_observability_timer.cancel()
             self._move_observability_timer = None
         self._active_goal_handle = None
+        self._current_plan_state = None
+        self._publish_arm_state()
         self._clear_active_move_observability()
 
     def _handle_move_result_timeout(self, step: MotionStep, generation: int) -> None:
@@ -2176,6 +2424,7 @@ class MotionPlannerNode(Node):
         self._pick_generation += 1
         self._pick_in_progress = False
         self._active_goal_handle = None
+        self._set_planning_request_active(False, publish=False)
         # self._release_latched_target("timed-out MoveGroup")
         self.get_logger().error(
             f"MoveGroup did not return a result for pick step {step.name!r} within "
@@ -2195,6 +2444,10 @@ class MotionPlannerNode(Node):
                 "profile": self._active_move_request_profile,
             },
         )
+        self._move_group_goal_may_be_active = False
+        self._current_plan_state = None
+        self._set_planning_request_active(False, publish=False)
+        self._publish_arm_state()
         self._clear_active_move_observability()
 
     def _log_active_move_wait(self) -> None:

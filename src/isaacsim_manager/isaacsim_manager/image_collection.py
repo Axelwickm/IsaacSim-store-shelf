@@ -46,7 +46,7 @@ _replicator_capture_enabled = False
 _timeline_autoplay_enabled = False
 _vision_panel = None
 _target_marker_visualizer = None
-_trajectory_executor = None
+_trajectory_executors = []
 _flow_state = None
 
 
@@ -288,7 +288,7 @@ def _update_collection_flow(flow_state: dict) -> None:
 
 
 def _update_store_demo_flow(flow_state: dict) -> None:
-    global _trajectory_executor
+    global _trajectory_executors
 
     if _timeline_autoplay_enabled and not _timeline_is_playing():
         return
@@ -309,10 +309,7 @@ def _update_store_demo_flow(flow_state: dict) -> None:
     flow_state["reset_time_remaining"] -= SIMULATION_STEP_SECONDS
     if flow_state["reset_time_remaining"] > 0.0:
         return
-    if (
-        _trajectory_executor is not None
-        and _trajectory_executor.has_active_trajectory()
-    ):
+    if any(executor.has_active_trajectory() for executor in _trajectory_executors):
         flow_state["reset_time_remaining"] = 1.0
         return
     print("[store_shelf] Store demo timed reset firing", flush=True)
@@ -326,8 +323,8 @@ def update_simulation_app(simulation_app) -> None:
         _vision_panel.update()
     if _target_marker_visualizer is not None:
         _target_marker_visualizer.update()
-    if _trajectory_executor is not None:
-        _trajectory_executor.update(SIMULATION_STEP_SECONDS)
+    for executor in _trajectory_executors:
+        executor.update(SIMULATION_STEP_SECONDS)
     if _flow_state is None:
         return
     if _flow_state["mode"] == "collect":
@@ -345,7 +342,7 @@ def _setup_store_shelf_scene(
     global _timeline_autoplay_enabled
     global _vision_panel
     global _target_marker_visualizer
-    global _trajectory_executor
+    global _trajectory_executors
     global _flow_state
 
     _replicator_capture_enabled = False
@@ -357,9 +354,9 @@ def _setup_store_shelf_scene(
     if _target_marker_visualizer is not None:
         _target_marker_visualizer.close()
         _target_marker_visualizer = None
-    if _trajectory_executor is not None:
-        _trajectory_executor.close()
-        _trajectory_executor = None
+    for executor in _trajectory_executors:
+        executor.close()
+    _trajectory_executors = []
 
     scene = construct_scene(configuration)
     _timeline_autoplay_enabled = (
@@ -501,9 +498,20 @@ def _setup_store_shelf_scene(
             rclpy.init(args=None)
         from .trajectory_executor import IsaacSimTrajectoryExecutor
 
-        _trajectory_executor = IsaacSimTrajectoryExecutor(
-            articulation_root_path=scene["ros2_joint_bridge"]["articulation_root_path"],
-        )
+        from .trajectory_executor import LEFT_ARM_JOINTS, RIGHT_ARM_JOINTS
+
+        _trajectory_executors = [
+            IsaacSimTrajectoryExecutor(
+                articulation_root_path=scene["ros2_joint_bridge"]["articulation_root_path"],
+                action_name="left_arm_controller/follow_joint_trajectory",
+                joint_names=LEFT_ARM_JOINTS,
+            ),
+            IsaacSimTrajectoryExecutor(
+                articulation_root_path=scene["ros2_joint_bridge"]["articulation_root_path"],
+                action_name="right_arm_controller/follow_joint_trajectory",
+                joint_names=RIGHT_ARM_JOINTS,
+            ),
+        ]
     if _timeline_autoplay_enabled:
         if _play_timeline_if_needed():
             print(

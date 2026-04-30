@@ -14,6 +14,7 @@
   <depend>joint_state_broadcaster</depend>
   <depend>joint_state_topic_hardware_interface</depend>
   <depend>geometry_msgs</depend>
+  <depend>isaac_ros_cumotion_interfaces</depend>
   <depend>moveit_configs_utils</depend>
   <depend>moveit_msgs</depend>
   <depend>moveit_ros_move_group</depend>

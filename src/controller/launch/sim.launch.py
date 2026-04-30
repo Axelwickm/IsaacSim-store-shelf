@@ -26,8 +26,18 @@ def generate_launch_description() -> LaunchDescription:
     controller_spawner_delay = LaunchConfiguration("controller_spawner_delay")
     move_group_delay = LaunchConfiguration("move_group_delay")
     move_group_log_level = LaunchConfiguration("move_group_log_level")
-    cumotion_robot_xrdf = LaunchConfiguration("cumotion_robot_xrdf")
-    cumotion_urdf_path = LaunchConfiguration("cumotion_urdf_path")
+    right_planning_cumotion_robot_xrdf = LaunchConfiguration(
+        "right_planning_cumotion_robot_xrdf"
+    )
+    right_planning_cumotion_urdf_path = LaunchConfiguration(
+        "right_planning_cumotion_urdf_path"
+    )
+    left_planning_cumotion_robot_xrdf = LaunchConfiguration(
+        "left_planning_cumotion_robot_xrdf"
+    )
+    left_planning_cumotion_urdf_path = LaunchConfiguration(
+        "left_planning_cumotion_urdf_path"
+    )
 
     return LaunchDescription(
         [
@@ -75,14 +85,24 @@ def generate_launch_description() -> LaunchDescription:
                 description="ROS log level for move_group.",
             ),
             DeclareLaunchArgument(
-                "cumotion_robot_xrdf",
-                default_value="/workspace/usd/robot/yumi_isaacsim.xrdf",
-                description="XRDF file for the standalone cuMotion planner node.",
+                "right_planning_cumotion_robot_xrdf",
+                default_value="/workspace/usd/robot/yumi_isaacsim_right_arm.xrdf",
+                description="XRDF file for the right-arm standalone cuMotion planning model.",
             ),
             DeclareLaunchArgument(
-                "cumotion_urdf_path",
-                default_value="/workspace/usd/robot/yumi_isaacsim.urdf",
-                description="URDF file for the standalone cuMotion planner node.",
+                "right_planning_cumotion_urdf_path",
+                default_value="/workspace/usd/robot/yumi_isaacsim_right_arm.urdf",
+                description="URDF file for the right-arm standalone cuMotion planning model.",
+            ),
+            DeclareLaunchArgument(
+                "left_planning_cumotion_robot_xrdf",
+                default_value="/workspace/usd/robot/yumi_isaacsim_left_arm.xrdf",
+                description="XRDF file for the left-arm standalone cuMotion planning model.",
+            ),
+            DeclareLaunchArgument(
+                "left_planning_cumotion_urdf_path",
+                default_value="/workspace/usd/robot/yumi_isaacsim_left_arm.urdf",
+                description="URDF file for the left-arm standalone cuMotion planning model.",
             ),
             Node(
                 package="controller",
@@ -101,13 +121,33 @@ def generate_launch_description() -> LaunchDescription:
                 condition=IfCondition(use_moveit),
                 launch_arguments={
                     "planning_pipeline": planning_pipeline,
+                    "planning_arm_side": "right",
+                    "move_group_namespace": "moveit_right",
+                    "launch_runtime_support": "true",
                     "use_rviz": use_moveit_rviz,
                     "use_sim_time": "true",
                     "controller_spawner_delay": controller_spawner_delay,
                     "move_group_delay": move_group_delay,
                     "move_group_log_level": move_group_log_level,
-                    "cumotion_robot_xrdf": cumotion_robot_xrdf,
-                    "cumotion_urdf_path": cumotion_urdf_path,
+                    "cumotion_robot_xrdf": right_planning_cumotion_robot_xrdf,
+                    "cumotion_urdf_path": right_planning_cumotion_urdf_path,
+                }.items(),
+            ),
+            IncludeLaunchDescription(
+                PythonLaunchDescriptionSource(_moveit_launch_path()),
+                condition=IfCondition(use_moveit),
+                launch_arguments={
+                    "planning_pipeline": planning_pipeline,
+                    "planning_arm_side": "left",
+                    "move_group_namespace": "moveit_left",
+                    "launch_runtime_support": "false",
+                    "use_rviz": "false",
+                    "use_sim_time": "true",
+                    "controller_spawner_delay": controller_spawner_delay,
+                    "move_group_delay": move_group_delay,
+                    "move_group_log_level": move_group_log_level,
+                    "cumotion_robot_xrdf": left_planning_cumotion_robot_xrdf,
+                    "cumotion_urdf_path": left_planning_cumotion_urdf_path,
                 }.items(),
             ),
         ]

@@ -10,6 +10,21 @@ from ament_index_python.packages import get_package_share_directory
 import xacro
 
 
+def _add_boolean_flag(
+    parser: argparse.ArgumentParser,
+    name: str,
+    *,
+    default: bool,
+    help_text: str,
+) -> None:
+    parser.add_argument(
+        f"--{name}",
+        action=argparse.BooleanOptionalAction,
+        default=default,
+        help=help_text,
+    )
+
+
 def _make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Export an Isaac Sim-ready YuMi URDF from the canonical xacro source."
@@ -20,10 +35,41 @@ def _make_parser() -> argparse.ArgumentParser:
         default=Path("/workspace/usd/robot/yumi_isaacsim.urdf"),
         help="Destination for the sanitized Isaac Sim URDF.",
     )
-    parser.add_argument(
-        "--with-ros2-control",
-        action="store_true",
-        help="Include the ros2_control topic hardware block in the exported URDF.",
+    _add_boolean_flag(
+        parser,
+        "with-ros2-control",
+        default=False,
+        help_text="Include the ros2_control topic hardware block in the exported URDF.",
+    )
+    _add_boolean_flag(
+        parser,
+        "include-left-arm",
+        default=True,
+        help_text="Include the left arm in the exported URDF.",
+    )
+    _add_boolean_flag(
+        parser,
+        "include-right-arm",
+        default=True,
+        help_text="Include the right arm in the exported URDF.",
+    )
+    _add_boolean_flag(
+        parser,
+        "include-left-gripper",
+        default=True,
+        help_text="Include the left gripper in the exported URDF.",
+    )
+    _add_boolean_flag(
+        parser,
+        "include-right-gripper",
+        default=True,
+        help_text="Include the right gripper in the exported URDF.",
+    )
+    _add_boolean_flag(
+        parser,
+        "rewrite-mesh-paths",
+        default=False,
+        help_text="Rewrite package mesh URIs to absolute filesystem paths for Isaac/curobo.",
     )
     return parser
 
@@ -83,7 +129,48 @@ def _rewrite_mesh_paths(root: ET.Element, package_share: Path) -> None:
         mesh.set("filename", str((meshes_root / relative_path).resolve()))
 
 
-def export_urdf(output_path: Path, *, with_ros2_control: bool = False) -> Path:
+def _is_arm_link_for_side(link_name: str, side: str) -> bool:
+    return (
+        link_name == "yumi_body"
+        or link_name.startswith(f"yumi_link_") and link_name.endswith(f"_{side}")
+        or link_name.startswith(f"gripper_{side}_")
+    )
+
+
+def _is_joint_for_side(joint: ET.Element, side: str) -> bool:
+    name = joint.get("name") or ""
+    if name.startswith("yumi_joint_") and name.endswith(f"_{side}"):
+        return True
+    if name.startswith("gripper_"):
+        return name.startswith(f"gripper_{side}_")
+    parent = joint.find("parent")
+    child = joint.find("child")
+    parent_link = parent.get("link", "") if parent is not None else ""
+    child_link = child.get("link", "") if child is not None else ""
+    return _is_arm_link_for_side(parent_link, side) and _is_arm_link_for_side(child_link, side)
+
+
+def _strip_other_side(root: ET.Element, side: str) -> None:
+    for parent in list(root.iter()):
+        for child in list(parent):
+            if child.tag == "joint" and not _is_joint_for_side(child, side):
+                parent.remove(child)
+            elif child.tag == "link":
+                name = child.get("name") or ""
+                if not _is_arm_link_for_side(name, side):
+                    parent.remove(child)
+
+
+def export_urdf(
+    output_path: Path,
+    *,
+    with_ros2_control: bool = False,
+    include_left_arm: bool = True,
+    include_right_arm: bool = True,
+    include_left_gripper: bool = True,
+    include_right_gripper: bool = True,
+    rewrite_mesh_paths: bool = True,
+) -> Path:
     package_share = Path(get_package_share_directory("yumi_description"))
     xacro_file = package_share / "urdf" / "yumi.urdf.xacro"
     document = xacro.process_file(
@@ -94,14 +181,24 @@ def export_urdf(output_path: Path, *, with_ros2_control: bool = False) -> Path:
             "use_ros2_control": "true" if with_ros2_control else "false",
             "joint_states_topic": "/isaac_joint_states",
             "joint_commands_topic": "/joint_command",
+            "include_left_arm": "true" if include_left_arm else "false",
+            "include_right_arm": "true" if include_right_arm else "false",
+            "include_left_gripper": "true" if include_left_gripper else "false",
+            "include_right_gripper": "true" if include_right_gripper else "false",
         },
     )
     root = ET.fromstring(document.toprettyxml(indent="  "))
 
     _strip_tag(root, "gazebo")
     _strip_tag(root, "transmission")
+    _strip_tag(root, "ros2_control")
     _strip_named_link(root, "world")
-    _rewrite_mesh_paths(root, package_share)
+    if include_left_arm and not include_right_arm:
+        _strip_other_side(root, "l")
+    elif include_right_arm and not include_left_arm:
+        _strip_other_side(root, "r")
+    if rewrite_mesh_paths:
+        _rewrite_mesh_paths(root, package_share)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     ET.indent(root)
@@ -115,6 +212,11 @@ def main() -> None:
     output_path = export_urdf(
         args.output.resolve(),
         with_ros2_control=args.with_ros2_control,
+        include_left_arm=args.include_left_arm,
+        include_right_arm=args.include_right_arm,
+        include_left_gripper=args.include_left_gripper,
+        include_right_gripper=args.include_right_gripper,
+        rewrite_mesh_paths=args.rewrite_mesh_paths,
     )
     print(f"Wrote Isaac Sim YuMi URDF to {output_path}")
 

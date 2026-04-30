@@ -1,0 +1,29 @@
+<?xml version="1.0" ?>
+<robot name="yumi">
+    <group name="right_arm">
+        <chain base_link="yumi_body" tip_link="gripper_r_grasp_frame" />
+    </group>
+    <group name="right_gripper">
+        <link name="gripper_r_base" />
+        <link name="gripper_r_finger_r" />
+        <link name="gripper_r_finger_l" />
+    </group>
+    <end_effector name="right_gripper_ee" parent_link="gripper_r_grasp_frame" group="right_gripper" parent_group="right_arm" />
+    <passive_joint name="gripper_r_joint_m" />
+    <passive_joint name="gripper_r_joint" />
+    <disable_collisions link1="gripper_r_base" link2="gripper_r_finger_l" reason="XRDF" />
+    <disable_collisions link1="gripper_r_base" link2="gripper_r_finger_r" reason="XRDF" />
+    <disable_collisions link1="gripper_r_base" link2="yumi_link_5_r" reason="XRDF" />
+    <disable_collisions link1="gripper_r_base" link2="yumi_link_6_r" reason="XRDF" />
+    <disable_collisions link1="gripper_r_base" link2="yumi_link_7_r" reason="XRDF" />
+    <disable_collisions link1="gripper_r_finger_l" link2="gripper_r_finger_r" reason="XRDF" />
+    <disable_collisions link1="yumi_body" link2="yumi_link_1_r" reason="XRDF" />
+    <disable_collisions link1="yumi_body" link2="yumi_link_2_r" reason="XRDF" />
+    <disable_collisions link1="yumi_link_1_r" link2="yumi_link_2_r" reason="XRDF" />
+    <disable_collisions link1="yumi_link_2_r" link2="yumi_link_3_r" reason="XRDF" />
+    <disable_collisions link1="yumi_link_3_r" link2="yumi_link_4_r" reason="XRDF" />
+    <disable_collisions link1="yumi_link_4_r" link2="yumi_link_5_r" reason="XRDF" />
+    <disable_collisions link1="yumi_link_5_r" link2="yumi_link_6_r" reason="XRDF" />
+    <disable_collisions link1="yumi_link_5_r" link2="yumi_link_7_r" reason="XRDF" />
+    <disable_collisions link1="yumi_link_6_r" link2="yumi_link_7_r" reason="XRDF" />
+</robot>

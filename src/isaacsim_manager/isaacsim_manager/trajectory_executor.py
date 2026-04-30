@@ -27,8 +27,23 @@ RIGHT_ARM_JOINTS = (
     "yumi_joint_5_r",
     "yumi_joint_6_r",
 )
-RIGHT_ARM_JOINT_SET = set(RIGHT_ARM_JOINTS)
-RIGHT_ARM_JOINT_LIMITS_RAD = {
+LEFT_ARM_JOINTS = (
+    "yumi_joint_1_l",
+    "yumi_joint_2_l",
+    "yumi_joint_7_l",
+    "yumi_joint_3_l",
+    "yumi_joint_4_l",
+    "yumi_joint_5_l",
+    "yumi_joint_6_l",
+)
+ARM_JOINT_LIMITS_RAD = {
+    "yumi_joint_1_l": (-2.84, 2.84),
+    "yumi_joint_2_l": (-2.4, 0.65),
+    "yumi_joint_7_l": (-2.84, 2.84),
+    "yumi_joint_3_l": (-2.0, 1.29),
+    "yumi_joint_4_l": (-4.9, 4.9),
+    "yumi_joint_5_l": (-1.43, 2.3),
+    "yumi_joint_6_l": (-3.89, 3.89),
     "yumi_joint_1_r": (-2.84, 2.84),
     "yumi_joint_2_r": (-2.4, 0.65),
     "yumi_joint_7_r": (-2.84, 2.84),
@@ -75,15 +90,20 @@ class IsaacSimTrajectoryExecutor:
         *,
         articulation_root_path: str,
         action_name: str = DEFAULT_ACTION_NAME,
+        joint_names: tuple[str, ...] = RIGHT_ARM_JOINTS,
     ) -> None:
         self._articulation_root_path = articulation_root_path
         self._action_name = action_name
+        self._joint_names = tuple(joint_names)
+        self._joint_name_set = set(self._joint_names)
         self._active: ActiveTrajectory | None = None
         self._lock = threading.Lock()
         self._articulation = None
         self._articulation_action_type = None
+        self._logged_first_command = False
 
-        self._node = Node("isaacsim_follow_joint_trajectory")
+        node_suffix = action_name.split("/", 1)[0].replace("/", "_")
+        self._node = Node(f"isaacsim_follow_joint_trajectory_{node_suffix}")
         self._executor = MultiThreadedExecutor(num_threads=2)
         self._executor.add_node(self._node)
         self._action_server = ActionServer(
@@ -101,7 +121,7 @@ class IsaacSimTrajectoryExecutor:
         self._spin_thread.start()
         self._node.get_logger().info(
             "Isaac Sim direct trajectory executor ready "
-            f"(action={action_name}, articulation={articulation_root_path})"
+            f"(action={action_name}, joints={','.join(self._joint_names)}, articulation={articulation_root_path})"
         )
 
     def _handle_cancel_request(self, _goal_handle) -> CancelResponse:
@@ -111,12 +131,12 @@ class IsaacSimTrajectoryExecutor:
         done_event = threading.Event()
         joint_names = list(goal_handle.request.trajectory.joint_names)
         points = list(goal_handle.request.trajectory.points)
-        if set(joint_names) != RIGHT_ARM_JOINT_SET:
+        if set(joint_names) != self._joint_name_set:
             error = (
                 "Unexpected trajectory joints: "
                 + ", ".join(joint_names)
-                + "; expected right-arm joint set: "
-                + ", ".join(RIGHT_ARM_JOINTS)
+                + "; expected joint set: "
+                + ", ".join(self._joint_names)
             )
             self._node.get_logger().error(error)
             goal_handle.abort()
@@ -232,7 +252,7 @@ class IsaacSimTrajectoryExecutor:
         self._articulation_action_type = ArticulationAction
         self._articulation = SingleArticulation(
             prim_path=self._articulation_root_path,
-            name="yumi_direct_trajectory_articulation",
+            name=f"yumi_direct_trajectory_articulation_{self._action_name.split('/', 1)[0]}",
         )
         self._articulation.initialize()
         self._node.get_logger().info(
@@ -284,14 +304,28 @@ class IsaacSimTrajectoryExecutor:
         return points[-1]
 
     def _apply_action(self, active: ActiveTrajectory, point: JointTrajectoryPoint) -> None:
+        positions = np.array(
+            self._clamped_positions(active.joint_names, point.positions),
+            dtype=np.float64,
+        )
         action = self._articulation_action_type(
-            joint_positions=np.array(
-                self._clamped_positions(active.joint_names, point.positions),
-                dtype=np.float64,
-            ),
+            joint_positions=positions,
             joint_indices=active.joint_indices,
         )
         self._articulation.apply_action(action)
+        self._articulation.set_joint_positions(
+            positions,
+            joint_indices=active.joint_indices,
+        )
+        if not self._logged_first_command:
+            self._logged_first_command = True
+            self._node.get_logger().info(
+                "Applied first direct Isaac joint command: "
+                + ", ".join(
+                    f"{name}={position:.4f}"
+                    for name, position in zip(active.joint_names, positions, strict=False)
+                )
+            )
 
     def _clamped_positions(
         self,
@@ -300,7 +334,9 @@ class IsaacSimTrajectoryExecutor:
     ) -> list[float]:
         clamped = []
         for joint_name, position in zip(joint_names, positions):
-            lower, upper = RIGHT_ARM_JOINT_LIMITS_RAD[joint_name]
+            if joint_name not in ARM_JOINT_LIMITS_RAD:
+                raise KeyError(f"Missing joint limits for {joint_name}")
+            lower, upper = ARM_JOINT_LIMITS_RAD[joint_name]
             clamped.append(
                 min(
                     max(position, lower + JOINT_LIMIT_MARGIN_RAD),

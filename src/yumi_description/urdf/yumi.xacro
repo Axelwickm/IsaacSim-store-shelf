@@ -10,7 +10,7 @@
   <xacro:property name="joint_damping" value="0.5" />
   <xacro:property name="max_effort" value="300"/>
  
-  <xacro:macro name="yumi" params="name hardware_interface *origin">
+  <xacro:macro name="yumi" params="name hardware_interface include_right_arm:=true include_left_arm:=true *origin">
 
     <link name="${name}_body">
       <inertial>
@@ -38,6 +38,7 @@
     </link>
 
 
+   <xacro:if value="${include_right_arm}">
    <!--///////////////////////////////////// RIGHT ARM ////////////////////////////////  -->
 
    <!-- joint between body and link_1_r -->
@@ -284,10 +285,12 @@
         <material name="Grey"/>
       </collision>
     </link>
+    </xacro:if>
 
 
 
 
+    <xacro:if value="${include_left_arm}">
     <!--///////////////////////////////////// LEFT ARM ////////////////////////////////  -->
 
     <!-- joint between body and link_1_l -->
@@ -534,6 +537,7 @@
         <material name="Grey"/>
       </collision>
     </link>
+    </xacro:if>
 
     <!--Extensions -->
     <xacro:yumi_gazebo name="${name}" />
