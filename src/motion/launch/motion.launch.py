@@ -26,6 +26,8 @@ def generate_launch_description() -> LaunchDescription:
     right_cumotion_urdf_path = LaunchConfiguration("right_cumotion_urdf_path")
     left_cumotion_robot_xrdf = LaunchConfiguration("left_cumotion_robot_xrdf")
     left_cumotion_urdf_path = LaunchConfiguration("left_cumotion_urdf_path")
+    collision_robot_xrdf = LaunchConfiguration("collision_robot_xrdf")
+    collision_robot_urdf_path = LaunchConfiguration("collision_robot_urdf_path")
 
     return LaunchDescription(
         [
@@ -94,22 +96,32 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "right_cumotion_robot_xrdf",
                 default_value="/workspace/usd/robot/yumi_isaacsim_right_arm.xrdf",
-                description="Right-arm XRDF used by the motion planner collision model.",
+                description="Right-arm XRDF used by the standalone cuMotion planner node.",
             ),
             DeclareLaunchArgument(
                 "right_cumotion_urdf_path",
                 default_value="/workspace/usd/robot/yumi_isaacsim_right_arm.urdf",
-                description="Right-arm URDF used by the motion planner collision model.",
+                description="Right-arm URDF used by the standalone cuMotion planner node.",
             ),
             DeclareLaunchArgument(
                 "left_cumotion_robot_xrdf",
                 default_value="/workspace/usd/robot/yumi_isaacsim_left_arm.xrdf",
-                description="Left-arm XRDF used by the motion planner collision model.",
+                description="Left-arm XRDF used by the standalone cuMotion planner node.",
             ),
             DeclareLaunchArgument(
                 "left_cumotion_urdf_path",
                 default_value="/workspace/usd/robot/yumi_isaacsim_left_arm.urdf",
-                description="Left-arm URDF used by the motion planner collision model.",
+                description="Left-arm URDF used by the standalone cuMotion planner node.",
+            ),
+            DeclareLaunchArgument(
+                "collision_robot_xrdf",
+                default_value="/workspace/usd/robot/yumi_isaacsim.xrdf",
+                description="Full YuMi XRDF used by Python planner collision diagnostics and peer-arm proxy generation.",
+            ),
+            DeclareLaunchArgument(
+                "collision_robot_urdf_path",
+                default_value="/workspace/usd/robot/yumi_isaacsim.urdf",
+                description="Full YuMi URDF used by Python planner collision diagnostics and peer-arm proxy generation.",
             ),
             Node(
                 package="motion",
@@ -144,8 +156,8 @@ def generate_launch_description() -> LaunchDescription:
                         "direct_trajectory_goal_time_tolerance": direct_trajectory_goal_time_tolerance,
                         "arm_state_topic": arm_state_topic,
                         "coordinator_state_topic": coordinator_state_topic,
-                        "robot_xrdf": right_cumotion_robot_xrdf,
-                        "robot_urdf": right_cumotion_urdf_path,
+                        "robot_xrdf": collision_robot_xrdf,
+                        "robot_urdf": collision_robot_urdf_path,
                     }
                 ],
             ),
@@ -170,8 +182,8 @@ def generate_launch_description() -> LaunchDescription:
                         "direct_trajectory_goal_time_tolerance": direct_trajectory_goal_time_tolerance,
                         "arm_state_topic": arm_state_topic,
                         "coordinator_state_topic": coordinator_state_topic,
-                        "robot_xrdf": left_cumotion_robot_xrdf,
-                        "robot_urdf": left_cumotion_urdf_path,
+                        "robot_xrdf": collision_robot_xrdf,
+                        "robot_urdf": collision_robot_urdf_path,
                     }
                 ],
             ),

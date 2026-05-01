@@ -974,7 +974,14 @@ class MotionPlannerNode(Node):
             self._retry_current_step()
             return
 
-        goal = self._build_move_group_goal(step)
+        try:
+            goal = self._build_move_group_goal(step)
+        except RuntimeError as error:
+            self.get_logger().error(
+                f"Cannot build MoveGroup goal for pick step {step.name!r}: {error}"
+            )
+            self._fail_active_step()
+            return
         request_id, request_profile = self._build_move_group_observability(step, goal)
         request_summary = request_profile["summary"]
         self._write_move_group_debug_artifact(
@@ -1288,28 +1295,27 @@ class MotionPlannerNode(Node):
                 acm.entry_values[proxy_index].enabled[link_index] = True
 
     def _build_other_arm_collision_objects(self) -> list[Any]:
-        if (
-            not self._inject_other_arm_collision_objects
-            or self._latest_joint_state is None
-            or CollisionObject is None
-        ):
+        if not self._inject_other_arm_collision_objects:
             return []
+        if self._latest_joint_state is None:
+            raise RuntimeError("latest joint state is unavailable")
+        if CollisionObject is None:
+            raise RuntimeError("MoveIt CollisionObject message support is unavailable")
         try:
             if self._collision_model is None or self._collision_tensor_args is None:
                 self._load_collision_model()
         except Exception as error:
-            self.get_logger().warn(
-                f"Other-arm collision object injection unavailable: {error}",
-                throttle_duration_sec=5.0,
-            )
-            return []
+            raise RuntimeError(
+                f"other-arm collision object injection unavailable: {error}"
+            ) from error
 
         import torch
 
         self._log_peer_plan_debug_summary()
         collision_objects: list[Any] = []
         proxy_links: set[str] = set()
-        for sample_index, position_map in enumerate(self._peer_sweep_position_maps()):
+        sample_maps, proxy_source = self._peer_sweep_position_maps()
+        for sample_index, position_map in enumerate(sample_maps):
             missing = [
                 joint_name
                 for joint_name in self._collision_joint_names
@@ -1346,13 +1352,30 @@ class MotionPlannerNode(Node):
             collision_objects.extend(sample_objects)
             proxy_links.update(sample_proxy_links)
         self._other_arm_proxy_links = proxy_links
-        if collision_objects:
-            self.get_logger().info(
-                f"Injected {len(collision_objects)} other-arm swept collision spheres "
-                f"from {self._other_arm_sweep_sample_count} configured samples "
-                f"(padding={self._other_arm_collision_radius_padding:.3f}m).",
-                throttle_duration_sec=5.0,
+        if not collision_objects:
+            other_arm_collision_links = sorted(
+                {
+                    link_name
+                    for link_name in self._collision_sphere_links
+                    if self._is_other_arm_link(link_name)
+                    and link_name not in self._other_arm_config.proxy_excluded_links
+                }
             )
+            raise RuntimeError(
+                "other-arm collision object injection produced 0 proxy spheres "
+                f"for {self._other_arm_side} arm using {self._robot_xrdf}; "
+                f"source={proxy_source}; "
+                f"available_other_arm_links={other_arm_collision_links or 'none'}"
+            )
+        self.get_logger().info(
+            f"Injected {len(collision_objects)} other-arm collision spheres "
+            f"for {self._other_arm_side} arm from {len(sample_maps)} {proxy_source} "
+            f"sample(s); proxy_links={sorted(proxy_links)}; "
+            f"excluded_proxy_links={sorted(self._other_arm_config.proxy_excluded_links)}; "
+            f"padding={self._other_arm_collision_radius_padding:.3f}m; "
+            f"model={self._robot_xrdf}.",
+            throttle_duration_sec=5.0,
+        )
         return collision_objects
 
     def _log_peer_plan_debug_summary(self) -> None:
@@ -1391,23 +1414,30 @@ class MotionPlannerNode(Node):
             f"end={self._joint_position_summary(joint_names, last_positions)}"
         )
 
-    def _peer_sweep_position_maps(self) -> list[dict[str, float]]:
+    def _peer_sweep_position_maps(self) -> tuple[list[dict[str, float]], str]:
         current_positions = self._latest_joint_position_map()
         peer_plan = self._peer_plan_state
         if not isinstance(peer_plan, dict):
-            return [current_positions]
+            return [current_positions], "static"
 
         joint_names = list(peer_plan.get("joint_names") or [])
         points = list(peer_plan.get("points") or [])
         published_ns = int(peer_plan.get("published_ns") or 0)
         final_time = float(peer_plan.get("final_time") or 0.0)
         if not joint_names or not points or published_ns <= 0:
-            return [current_positions]
+            return [current_positions], "static-invalid-peer-plan"
 
         now_ns = int(self.get_clock().now().nanoseconds)
         elapsed = max(0.0, (now_ns - published_ns) * 1e-9)
         if elapsed > final_time + self._peer_plan_extra_horizon_seconds:
-            return [current_positions]
+            self.get_logger().info(
+                f"Ignoring stale peer plan for {self._other_arm_side} arm; "
+                f"elapsed={elapsed:.3f}s, final_time={final_time:.3f}s, "
+                f"extra_horizon={self._peer_plan_extra_horizon_seconds:.3f}s. "
+                "Using static current joint-state proxy.",
+                throttle_duration_sec=5.0,
+            )
+            return [current_positions], "static-stale-peer-plan"
 
         sample_times = self._peer_sweep_sample_times(elapsed, final_time)
         samples = []
@@ -1426,7 +1456,7 @@ class MotionPlannerNode(Node):
                 }
             )
             samples.append(position_map)
-        return samples or [current_positions]
+        return (samples or [current_positions]), "swept-peer-plan"
 
     def _latest_joint_position_map(self) -> dict[str, float]:
         if self._latest_joint_state is None:
@@ -1854,6 +1884,27 @@ class MotionPlannerNode(Node):
         )
         self._collision_model = CudaRobotModel(model_config)
         self._collision_joint_names = list(self._collision_model.joint_names)
+        planning_links = sorted(
+            {
+                link_name
+                for link_name in self._collision_sphere_links
+                if self._is_planning_arm_link(link_name)
+            }
+        )
+        other_links = sorted(
+            {
+                link_name
+                for link_name in self._collision_sphere_links
+                if self._is_other_arm_link(link_name)
+            }
+        )
+        self.get_logger().info(
+            f"Loaded collision model from {self._robot_xrdf}: "
+            f"joints={self._collision_joint_names}; "
+            f"planning_arm_links={planning_links}; "
+            f"other_arm_links={other_links}; "
+            f"spheres={len(self._collision_sphere_links)}."
+        )
 
     def _find_sphere_collisions(
         self,

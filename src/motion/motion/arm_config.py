@@ -61,7 +61,7 @@ ARM_SIDE_CONFIGS: dict[str, ArmSideConfig] = {
         gripper_joint="gripper_l_joint",
         gripper_mimic_joint="gripper_l_joint_m",
         gripper_prefix="gripper_l_",
-        proxy_excluded_links=frozenset({"yumi_link_1_r", "yumi_link_2_r"}),
+        proxy_excluded_links=frozenset({"yumi_link_1_l", "yumi_link_2_l"}),
     ),
     "right": ArmSideConfig(
         side="right",
@@ -81,7 +81,7 @@ ARM_SIDE_CONFIGS: dict[str, ArmSideConfig] = {
         gripper_joint="gripper_r_joint",
         gripper_mimic_joint="gripper_r_joint_m",
         gripper_prefix="gripper_r_",
-        proxy_excluded_links=frozenset({"yumi_link_1_l", "yumi_link_2_l"}),
+        proxy_excluded_links=frozenset({"yumi_link_1_r", "yumi_link_2_r"}),
     ),
 }
 
