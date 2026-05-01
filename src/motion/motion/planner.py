@@ -13,7 +13,7 @@ from ament_index_python.packages import PackageNotFoundError, get_package_share_
 from geometry_msgs.msg import PointStamped, Pose, PoseStamped
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Empty, String
+from std_msgs.msg import String
 
 from .arm_config import JOINT_LIMIT_MARGIN_RAD, JOINT_POSITION_LIMITS, get_arm_side_config
 from .coordination import decode_payload, encode_payload
@@ -21,7 +21,6 @@ from .occupancy import (
     build_other_arm_collision_objects,
     is_arm_link,
     merged_position_map,
-    reserved_point_distance,
     sample_peer_plan_point,
     serialize_planned_trajectory,
 )
@@ -116,7 +115,7 @@ MOVEIT_ERROR_CODE_NAMES = {
 }
 
 RELEASE_TARGET_ON_MOVEIT_ERROR_CODES = {
-    99999,  # Generic planning failure from MoveIt/OMPL.
+    99999,  # Generic planning failure from MoveIt/cuMotion.
     -1,     # PLANNING_FAILED
     -2,     # INVALID_MOTION_PLAN
     -3,     # MOTION_PLAN_INVALIDATED_BY_ENVIRONMENT_CHANGE
@@ -158,19 +157,10 @@ class MotionPlannerNode(Node):
         self.declare_parameter("gripper_open_position", 0.025)
         self.declare_parameter("gripper_closed_position", 0.0)
         self.declare_parameter("gripper_command_settle_seconds", 0.0)
-        self.declare_parameter("target_pose_topic", "/motion/target_pose")
-        self.declare_parameter("selected_item_point_topic", "/vision/selected_item_point")
-        self.declare_parameter(
-            "selected_item_moveit_point_topic",
-            "/vision/selected_item_moveit_point",
-        )
-        self.declare_parameter("latched_target_point_topic", "/motion/latched_target_point")
-        self.declare_parameter("clear_latched_target_topic", "/motion/clear_latched_target")
         self.declare_parameter(
             "display_trajectory_topic",
             "/moveit/display_planned_path",
         )
-        self.declare_parameter("auto_execute_pick", True)
         self.declare_parameter("plan_only", True)
         self.declare_parameter("pregrasp_offset_xyz", [0.0, 0.0, 0.08])
         self.declare_parameter("grasp_offset_xyz", [0.0, 0.0, 0.0])
@@ -215,9 +205,8 @@ class MotionPlannerNode(Node):
         self.declare_parameter("max_acceleration_scaling_factor", 0.2)
         self.declare_parameter("arm_state_topic", "/motion/arm_state")
         self.declare_parameter("coordinator_state_topic", "/motion/coordinator_state")
-        self.declare_parameter("reservation_distance_threshold", 0.05)
+        self.declare_parameter("peer_plan_topic", "/motion/peer_plan")
         self.declare_parameter("peer_plan_extra_horizon_seconds", 2.0)
-        self.declare_parameter("coordination_heartbeat_seconds", 1.0)
 
         self._validate_external_dependencies()
 
@@ -257,19 +246,6 @@ class MotionPlannerNode(Node):
             or self._planning_arm_config.direct_trajectory_action
         )
         joint_command_topic = str(self.get_parameter("joint_command_topic").value)
-        target_pose_topic = str(self.get_parameter("target_pose_topic").value)
-        selected_item_point_topic = str(
-            self.get_parameter("selected_item_point_topic").value
-        )
-        selected_item_moveit_point_topic = str(
-            self.get_parameter("selected_item_moveit_point_topic").value
-        )
-        latched_target_point_topic = str(
-            self.get_parameter("latched_target_point_topic").value
-        )
-        clear_latched_target_topic = str(
-            self.get_parameter("clear_latched_target_topic").value
-        )
         display_trajectory_topic = str(
             self.get_parameter("display_trajectory_topic").value
         )
@@ -297,24 +273,18 @@ class MotionPlannerNode(Node):
         self._coordinator_state_topic = str(
             self.get_parameter("coordinator_state_topic").value
         )
-        self._reservation_distance_threshold = max(
-            float(self.get_parameter("reservation_distance_threshold").value),
-            0.0,
-        )
+        self._peer_plan_topic = str(self.get_parameter("peer_plan_topic").value)
         self._peer_plan_extra_horizon_seconds = max(
             float(self.get_parameter("peer_plan_extra_horizon_seconds").value),
             0.0,
         )
 
-        self._latched_target_point: PointStamped | None = None
-        self._latest_world_selected_item_point: PointStamped | None = None
+        self._assigned_world_point: PointStamped | None = None
         self._latest_joint_state: JointState | None = None
         self._joint_state_ready = False
         self._logged_joint_state_names = False
-        self._pick_in_progress = False
+        self._step_running = False
         self._pending_pick_point: PointStamped | None = None
-        self._pick_sequence: list[MotionStep] = []
-        self._pick_sequence_index = 0
         self._pick_generation = 0
         self._move_request_serial = 0
         self._step_timer: Any | None = None
@@ -329,7 +299,6 @@ class MotionPlannerNode(Node):
         self._move_group_goal_may_be_active = False
         self._pipeline_id = pipeline_id
         self._planner_id = planner_id
-        self._auto_execute_pick = bool(self.get_parameter("auto_execute_pick").value)
         self._plan_only = bool(self.get_parameter("plan_only").value)
         self._direct_trajectory_result_timeout = max(
             float(self.get_parameter("direct_trajectory_result_timeout").value),
@@ -414,10 +383,6 @@ class MotionPlannerNode(Node):
         self._max_acceleration_scaling_factor = float(
             self.get_parameter("max_acceleration_scaling_factor").value
         )
-        self._coordination_heartbeat_seconds = max(
-            float(self.get_parameter("coordination_heartbeat_seconds").value),
-            0.1,
-        )
         self._collision_model = None
         self._collision_tensor_args = None
         self._collision_joint_names: list[str] = []
@@ -434,15 +399,12 @@ class MotionPlannerNode(Node):
         self._planning_scene_ready_logged = False
         self._dynamic_collision_object_ids: set[str] = set()
         self._pending_pick_retry_timer: Any | None = None
-        self._coordinator_state: dict[str, Any] = {"planning_owner": None, "arms": {}}
+        self._coordinator_state: dict[str, Any] = {"arms": {}}
         self._current_plan_state: dict[str, Any] | None = None
-        self._planning_request_active = False
-        self._planning_request_stamp_ns = 0
-        self._latched_target_point_publisher = self.create_publisher(
-            PointStamped,
-            latched_target_point_topic,
-            10,
-        )
+        self._peer_plan_state: dict[str, Any] | None = None
+        self._active_step_command_id = 0
+        self._active_step_name = ""
+        self._step_status: dict[str, Any] | None = None
         self._joint_command_publisher = self.create_publisher(
             JointState,
             joint_command_topic,
@@ -451,6 +413,11 @@ class MotionPlannerNode(Node):
         self._arm_state_publisher = self.create_publisher(
             String,
             self._arm_state_topic,
+            10,
+        )
+        self._peer_plan_publisher = self.create_publisher(
+            String,
+            self._peer_plan_topic,
             10,
         )
         self._planning_scene_diff_publisher = None
@@ -501,34 +468,10 @@ class MotionPlannerNode(Node):
                 planning_scene_service,
             )
 
-        self._target_pose_subscription = self.create_subscription(
-            PoseStamped,
-            target_pose_topic,
-            self._handle_target_pose,
-            10,
-        )
-        self._selected_item_point_subscription = self.create_subscription(
-            PointStamped,
-            selected_item_point_topic,
-            self._handle_selected_item_point,
-            10,
-        )
         self._joint_state_subscription = self.create_subscription(
             JointState,
             "/joint_states",
             self._handle_joint_state,
-            10,
-        )
-        self._selected_item_moveit_point_subscription = self.create_subscription(
-            PointStamped,
-            selected_item_moveit_point_topic,
-            self._handle_selected_item_moveit_point,
-            10,
-        )
-        self._clear_latched_target_subscription = self.create_subscription(
-            Empty,
-            clear_latched_target_topic,
-            self._handle_clear_latched_target,
             10,
         )
         self._coordinator_state_subscription = self.create_subscription(
@@ -537,9 +480,11 @@ class MotionPlannerNode(Node):
             self._handle_coordinator_state,
             10,
         )
-        self._coordination_heartbeat_timer = self.create_timer(
-            self._coordination_heartbeat_seconds,
-            self._publish_coordination_heartbeat,
+        self._peer_plan_subscription = self.create_subscription(
+            String,
+            self._peer_plan_topic,
+            self._handle_peer_plan,
+            10,
         )
 
         self.get_logger().info(
@@ -551,13 +496,7 @@ class MotionPlannerNode(Node):
             f"direct_execute={not self._plan_only})"
         )
         self.get_logger().info(
-            f"Listening for target poses on {target_pose_topic}."
-        )
-        self.get_logger().info(
-            f"Listening for selected item points on {selected_item_point_topic}; "
-            f"planning points on {selected_item_moveit_point_topic}; "
-            f"first world point is latched and republished on {latched_target_point_topic}. "
-            f"Publish std_msgs/Empty on {clear_latched_target_topic} to latch a new point."
+            "Waiting for assigned targets from the motion coordinator."
         )
         self.get_logger().info(
             f"MoveGroup debug artifacts will be written under "
@@ -565,7 +504,8 @@ class MotionPlannerNode(Node):
         )
         self.get_logger().info(
             f"Arm state topic: {self._arm_state_topic}; "
-            f"coordinator state topic: {self._coordinator_state_topic}"
+            f"coordinator state topic: {self._coordinator_state_topic}; "
+            f"peer plan topic: {self._peer_plan_topic}"
         )
         if self._required_planning_scene_object_ids:
             self.get_logger().info(
@@ -608,18 +548,6 @@ class MotionPlannerNode(Node):
             )
         return [float(element) for element in value]
 
-    def _handle_target_pose(self, message: PoseStamped) -> None:
-        self.get_logger().info(
-            "Received target pose in frame "
-            f"{message.header.frame_id!r} at "
-            f"({message.pose.position.x:.3f}, "
-            f"{message.pose.position.y:.3f}, "
-            f"{message.pose.position.z:.3f})."
-        )
-
-    def _handle_selected_item_point(self, message: PointStamped) -> None:
-        self._latest_world_selected_item_point = deepcopy(message)
-
     def _handle_joint_state(self, message: JointState) -> None:
         if not message.name or len(message.name) != len(message.position):
             return
@@ -633,65 +561,41 @@ class MotionPlannerNode(Node):
             + ", ".join(message.name)
         )
 
-    def _handle_selected_item_moveit_point(self, message: PointStamped) -> None:
-        if self._latched_target_point is not None:
+    def _latch_assigned_target(
+        self,
+        world_point: PointStamped,
+        moveit_point: PointStamped,
+    ) -> None:
+        if self._assigned_world_point is not None:
             return
-        if self._peer_has_reserved_point(message):
-            self.get_logger().info(
-                "Ignoring selected item point because the peer arm has already reserved "
-                "a nearby target."
-            )
-            return
-
-        self._latched_target_point = deepcopy(
-            self._latest_world_selected_item_point or message
-        )
-        self._pending_pick_point = deepcopy(message)
-        self._set_planning_request_active(True, publish=False)
-        self._publish_arm_state()
-        self._latched_target_point_publisher.publish(self._latched_target_point)
-        self.get_logger().info(
-            "Latched selected item point for visualization in frame "
-            f"{self._latched_target_point.header.frame_id!r} at "
-            f"({self._latched_target_point.point.x:.3f}, "
-            f"{self._latched_target_point.point.y:.3f}, "
-            f"{self._latched_target_point.point.z:.3f}); "
-            f"planning in frame {message.header.frame_id!r} at "
-            f"({message.point.x:.3f}, {message.point.y:.3f}, {message.point.z:.3f})."
-        )
-        self._publish_grasp_debug_poses_in_moveit_frame(message)
-        if self._auto_execute_pick:
-            self._ensure_pick_prerequisites()
-
-    def _handle_clear_latched_target(self, _message: Empty) -> None:
-        if self._latched_target_point is None:
-            self.get_logger().info("No latched target point to clear.")
-            self._abort_pick_sequence("clear requested")
-            return
-
-        point = self._latched_target_point.point
-        self._latched_target_point = None
-        self._pending_pick_point = None
-        self._abort_pick_sequence("clear requested")
+        self._assigned_world_point = deepcopy(world_point)
+        self._pending_pick_point = deepcopy(moveit_point)
         self._publish_arm_state()
         self.get_logger().info(
-            "Cleared latched target point at "
-            f"({point.x:.3f}, {point.y:.3f}, {point.z:.3f})."
+            "Accepted assigned target from coordinator in frame "
+            f"{self._assigned_world_point.header.frame_id!r} at "
+            f"({self._assigned_world_point.point.x:.3f}, "
+            f"{self._assigned_world_point.point.y:.3f}, "
+            f"{self._assigned_world_point.point.z:.3f}); "
+            f"planning in frame {moveit_point.header.frame_id!r} at "
+            f"({moveit_point.point.x:.3f}, {moveit_point.point.y:.3f}, "
+            f"{moveit_point.point.z:.3f})."
         )
+        self._publish_grasp_debug_poses_in_moveit_frame(moveit_point)
+        self._try_execute_assigned_step()
 
     def _release_latched_target(self, reason: str) -> None:
-        if self._latched_target_point is None:
+        if self._assigned_world_point is None:
             return
 
-        point = self._latched_target_point.point
-        self._latched_target_point = None
+        point = self._assigned_world_point.point
+        self._assigned_world_point = None
         self._pending_pick_point = None
-        self._set_planning_request_active(False, publish=False)
         self._publish_arm_state()
         self.get_logger().info(
             f"Released {reason} target at "
             f"({point.x:.3f}, {point.y:.3f}, {point.z:.3f}); "
-            "waiting to latch the next selected item point."
+            "waiting for the next coordinator assignment."
         )
 
     def _handle_coordinator_state(self, message: String) -> None:
@@ -703,52 +607,55 @@ class MotionPlannerNode(Node):
             )
             return
         self._coordinator_state = payload
+        self._sync_assigned_target_from_coordinator()
+        self._try_execute_assigned_step()
+
+    def _handle_peer_plan(self, message: String) -> None:
+        payload = decode_payload(message)
+        if payload is None:
+            return
+        arm_side = str(payload.get("arm_side", "")).strip().lower()
+        if arm_side != self._other_arm_side:
+            return
+        self._peer_plan_state = payload
+
+    def _sync_assigned_target_from_coordinator(self) -> None:
+        assigned_target = self._assigned_target_for_self()
+        if assigned_target is None:
+            self._clear_local_assignment_if_idle()
+            return
+        if self._assigned_world_point is not None:
+            return
+        if self._step_running or self._move_group_goal_may_be_active:
+            return
+        self._clear_local_assignment_if_idle()
+        assigned_target = self._assigned_target_for_self()
+        if assigned_target is None:
+            return
+        world_point = self._deserialize_point_payload(assigned_target.get("world_point"))
+        moveit_point = self._deserialize_point_payload(assigned_target.get("moveit_point"))
+        if world_point is None or moveit_point is None:
+            return
+        self._latch_assigned_target(world_point, moveit_point)
+
+    def _clear_local_assignment_if_idle(self) -> None:
+        if self._assigned_world_point is None:
+            return
+        if self._step_running or self._move_group_goal_may_be_active:
+            return
+        self._assigned_world_point = None
+        self._pending_pick_point = None
+        self._publish_arm_state()
 
     def _publish_arm_state(self) -> None:
         self._arm_state_publisher.publish(encode_payload(self._arm_state_payload()))
 
-    def _set_planning_request_active(self, active: bool, *, publish: bool = True) -> None:
-        if active:
-            if not self._planning_request_active:
-                self._planning_request_stamp_ns = int(
-                    self.get_clock().now().nanoseconds
-                )
-            self._planning_request_active = True
-        else:
-            self._planning_request_active = False
-            self._planning_request_stamp_ns = 0
-        if publish:
-            self._publish_arm_state()
-
-    def _publish_coordination_heartbeat(self) -> None:
-        if (
-            self._pending_pick_point is None
-            and not self._pick_in_progress
-            and self._latched_target_point is None
-            and self._current_plan_state is None
-        ):
-            return
-        self._publish_arm_state()
-
     def _arm_state_payload(self) -> dict[str, Any]:
-        reservation = None
-        if self._latched_target_point is not None:
-            reservation = {
-                "frame_id": self._latched_target_point.header.frame_id,
-                "xyz": [
-                    float(self._latched_target_point.point.x),
-                    float(self._latched_target_point.point.y),
-                    float(self._latched_target_point.point.z),
-                ],
-            }
         return {
             "arm_side": self._planning_arm_side,
             "stamp_ns": int(self.get_clock().now().nanoseconds),
-            "request_planning": bool(self._planning_request_active),
-            "request_stamp_ns": int(self._planning_request_stamp_ns),
-            "reserved_point": reservation,
-            "plan": self._current_plan_state,
-            "pick_in_progress": bool(self._pick_in_progress),
+            "step_status": self._step_status,
+            "motion_active": bool(self._move_group_goal_may_be_active),
         }
 
     def _peer_state(self) -> dict[str, Any]:
@@ -758,20 +665,47 @@ class MotionPlannerNode(Node):
         peer_state = arms.get(self._other_arm_side)
         return peer_state if isinstance(peer_state, dict) else {}
 
-    def _peer_has_reserved_point(self, point: PointStamped) -> bool:
-        peer_state = self._peer_state()
-        if not peer_state:
-            return False
-        distance = reserved_point_distance(
-            peer_state.get("reserved_point"),
-            point.header.frame_id,
-            (
-                float(point.point.x),
-                float(point.point.y),
-                float(point.point.z),
-            ),
-        )
-        return distance is not None and distance <= self._reservation_distance_threshold
+    def _publish_peer_plan_state(self) -> None:
+        if self._current_plan_state is None:
+            return
+        payload = dict(self._current_plan_state)
+        payload["arm_side"] = self._planning_arm_side
+        self._peer_plan_publisher.publish(encode_payload(payload))
+
+    def _assigned_target_for_self(self) -> dict[str, Any] | None:
+        assigned_target = self._coordinator_state.get("assigned_target")
+        if not isinstance(assigned_target, dict):
+            return None
+        assigned_arm = str(assigned_target.get("arm_side", "")).strip().lower()
+        if assigned_arm != self._planning_arm_side:
+            return None
+        return assigned_target
+
+    def _assigned_step_for_self(self) -> dict[str, Any] | None:
+        active_step = self._coordinator_state.get("active_step")
+        if not isinstance(active_step, dict):
+            return None
+        assigned_arm = str(active_step.get("arm_side", "")).strip().lower()
+        if assigned_arm != self._planning_arm_side:
+            return None
+        return active_step
+
+    def _deserialize_point_payload(self, payload: Any) -> PointStamped | None:
+        if not isinstance(payload, dict):
+            return None
+        xyz = payload.get("xyz") or []
+        if len(xyz) != 3:
+            return None
+        message = PointStamped()
+        message.header.frame_id = str(payload.get("frame_id", ""))
+        stamp_ns = int(payload.get("stamp_ns") or 0)
+        if stamp_ns > 0:
+            message.header.stamp.sec = stamp_ns // 1_000_000_000
+            message.header.stamp.nanosec = stamp_ns % 1_000_000_000
+        message.point.x = float(xyz[0])
+        message.point.y = float(xyz[1])
+        message.point.z = float(xyz[2])
+        return message
 
     def _publish_grasp_debug_poses_in_moveit_frame(self, moveit_point: PointStamped) -> None:
         pregrasp_pose, grasp_pose, retract_pose, drop_pose = self._build_grasp_poses(
@@ -781,6 +715,14 @@ class MotionPlannerNode(Node):
         self._grasp_pose_publisher.publish(grasp_pose)
         self._retract_pose_publisher.publish(retract_pose)
         self._drop_pose_publisher.publish(drop_pose)
+
+    def _set_step_status(self, command_id: int, name: str, state: str) -> None:
+        self._step_status = {
+            "command_id": int(command_id),
+            "name": str(name),
+            "state": str(state),
+        }
+        self._publish_arm_state()
 
     def _build_grasp_poses(
         self,
@@ -796,6 +738,77 @@ class MotionPlannerNode(Node):
         )
         self._set_top_down_orientation(drop_pose)
         return pregrasp_pose, grasp_pose, retract_pose, drop_pose
+
+    def _command_step_for_target(
+        self,
+        command_name: str,
+        point: PointStamped,
+    ) -> MotionStep | None:
+        pregrasp_pose, grasp_pose, retract_pose, drop_pose = self._build_grasp_poses(point)
+        if command_name == "approach_pregrasp":
+            return MotionStep("approach pregrasp", pose=pregrasp_pose)
+        if command_name == "move_to_grasp":
+            return MotionStep("move to grasp", pose=grasp_pose)
+        if command_name == "close_gripper":
+            return MotionStep(f"close {self._planning_arm_side} gripper", gripper_closed=True)
+        if command_name == "retract":
+            return MotionStep("retract", pose=retract_pose)
+        if command_name == "move_to_drop":
+            return MotionStep(
+                "move to drop",
+                pose=drop_pose,
+                force_top_down=True,
+                top_down_tolerance_xyz=self._release_top_down_orientation_tolerance_xyz,
+                top_down_weight=self._release_top_down_orientation_weight,
+            )
+        if command_name == "open_gripper":
+            return MotionStep(f"open {self._planning_arm_side} gripper", gripper_closed=False)
+        return None
+
+    def _try_execute_assigned_step(self) -> None:
+        if self._pending_pick_point is None or self._move_group_goal_may_be_active:
+            return
+        assigned_step = self._assigned_step_for_self()
+        if assigned_step is None:
+            return
+        command_id = int(assigned_step.get("command_id") or 0)
+        command_name = str(assigned_step.get("name", "")).strip()
+        if command_id <= 0 or not command_name:
+            return
+        if (
+            self._step_status is not None
+            and int(self._step_status.get("command_id") or 0) == command_id
+            and str(self._step_status.get("state", "")).strip().lower() in {"running", "succeeded", "failed"}
+        ):
+            return
+        if not self._joint_state_ready or self._latest_joint_state is None:
+            self.get_logger().warning(
+                "Deferring step start until a valid /joint_states message is available."
+            )
+            self._schedule_pending_pick_retry()
+            return
+        if not self._planning_scene_ready:
+            self._request_planning_scene_readiness_check()
+            self.get_logger().warning(
+                "Deferring step start until required planning scene objects are available."
+            )
+            self._schedule_pending_pick_retry()
+            return
+        self._cancel_pending_pick_retry()
+        step = self._command_step_for_target(command_name, self._pending_pick_point)
+        if step is None:
+            self.get_logger().error(f"Unknown assigned step {command_name!r}.")
+            self._set_step_status(command_id, command_name, "failed")
+            return
+        self._active_step_command_id = command_id
+        self._active_step_name = command_name
+        self._step_running = True
+        self._set_step_status(command_id, command_name, "running")
+        self.get_logger().info(
+            f"Executing assigned step {command_name!r} for {self._planning_arm_side} arm "
+            f"(command_id={command_id})."
+        )
+        self._execute_motion_step(step)
 
     def _drop_position_for_arm(self) -> list[float]:
         if self._planning_arm_side == "left":
@@ -842,85 +855,6 @@ class MotionPlannerNode(Node):
         pose.pose.orientation.z = self._top_down_orientation_xyzw[2]
         pose.pose.orientation.w = self._top_down_orientation_xyzw[3]
 
-    def _start_pick_sequence(self, point: PointStamped) -> None:
-        if self._pick_in_progress:
-            self.get_logger().warning("Pick sequence is already running; ignoring target.")
-            return
-
-        self._pending_pick_point = None
-        pregrasp_pose, grasp_pose, retract_pose, drop_pose = self._build_grasp_poses(point)
-        self._pick_sequence = [
-            MotionStep("approach pregrasp", pose=pregrasp_pose),
-            MotionStep("move to grasp", pose=grasp_pose),
-            MotionStep(f"close {self._planning_arm_side} gripper", gripper_closed=True),
-            MotionStep("retract", pose=retract_pose),
-            MotionStep(
-                "move to drop",
-                pose=drop_pose,
-                force_top_down=True,
-                top_down_tolerance_xyz=self._release_top_down_orientation_tolerance_xyz,
-                top_down_weight=self._release_top_down_orientation_weight,
-            ),
-            MotionStep(f"open {self._planning_arm_side} gripper", gripper_closed=False),
-        ]
-        self._pick_sequence_index = 0
-        self._pick_generation += 1
-        self._pick_in_progress = True
-        self._publish_arm_state()
-        self.get_logger().info(
-            f"Starting fixed-scene {self._planning_arm_side}-arm pick sequence."
-        )
-        self._execute_next_pick_step()
-
-    def _abort_pick_sequence(self, reason: str) -> None:
-        self._pick_generation += 1
-        self._pick_in_progress = False
-        self._pick_sequence = []
-        self._pick_sequence_index = 0
-        if self._step_timer is not None:
-            self._step_timer.cancel()
-            self._step_timer = None
-        if self._move_result_timer is not None:
-            self._move_result_timer.cancel()
-            self._move_result_timer = None
-        if self._move_observability_timer is not None:
-            self._move_observability_timer.cancel()
-            self._move_observability_timer = None
-        if self._active_goal_handle is not None:
-            self.get_logger().info(
-                f"Stopped local pick sequence after {reason}; not canceling active "
-                "action goal because preempt can crash this setup."
-            )
-            self._active_goal_handle = None
-        self._active_move_step_name = ""
-        self._active_move_request_id = ""
-        self._active_move_request_summary = ""
-        self._active_move_request_profile = {}
-        self._active_move_started_monotonic = 0.0
-        self._current_plan_state = None
-        self._set_planning_request_active(False, publish=False)
-        self._cancel_pending_pick_retry()
-        self._publish_arm_state()
-
-    def _ensure_pick_prerequisites(self) -> None:
-        if self._pending_pick_point is None or self._pick_in_progress:
-            return
-        if not self._joint_state_ready or self._latest_joint_state is None:
-            self.get_logger().warning(
-                "Deferring pick start until a valid /joint_states message is available."
-            )
-            self._schedule_pending_pick_retry()
-            return
-        if not self._planning_scene_ready:
-            self._request_planning_scene_readiness_check()
-            self.get_logger().warning(
-                "Deferring pick start until required planning scene objects are available."
-            )
-            self._schedule_pending_pick_retry()
-            return
-        self._cancel_pending_pick_retry()
-        self._start_pick_sequence(self._pending_pick_point)
-
     def _schedule_pending_pick_retry(self) -> None:
         if self._pending_pick_retry_timer is not None:
             return
@@ -936,11 +870,10 @@ class MotionPlannerNode(Node):
 
     def _retry_pending_pick_once(self) -> None:
         self._cancel_pending_pick_retry()
-        self._ensure_pick_prerequisites()
+        self._try_execute_assigned_step()
 
-    def _has_planning_turn(self) -> bool:
-        planning_owner = self._coordinator_state.get("planning_owner")
-        return planning_owner == self._planning_arm_side
+    def _peer_motion_active(self) -> bool:
+        return bool(self._peer_state().get("motion_active"))
 
     def _request_planning_scene_readiness_check(self) -> None:
         if (
@@ -984,18 +917,9 @@ class MotionPlannerNode(Node):
             self.get_logger().info(
                 "Planning scene is ready; required shelf collision objects are present."
             )
-        self._ensure_pick_prerequisites()
+        self._try_execute_assigned_step()
 
-    def _execute_next_pick_step(self) -> None:
-        if self._pick_sequence_index >= len(self._pick_sequence):
-            self._pick_in_progress = False
-            self.get_logger().info("Pick sequence completed.")
-            self._release_latched_target("completed pick")
-            return
-
-        step = self._pick_sequence[self._pick_sequence_index]
-        self._pick_sequence_index += 1
-
+    def _execute_motion_step(self, step: MotionStep) -> None:
         if step.gripper_closed is not None:
             self._publish_gripper_command(step.gripper_closed)
             state = "closed" if step.gripper_closed else "opened"
@@ -1004,31 +928,32 @@ class MotionPlannerNode(Node):
                 "Published direct joint command to Isaac Sim."
             )
             if self._gripper_command_settle_seconds <= 0.0:
-                self._execute_next_pick_step()
+                self._step_running = False
+                self._set_step_status(self._active_step_command_id, self._active_step_name, "succeeded")
             else:
                 self._step_timer = self.create_timer(
                     self._gripper_command_settle_seconds,
-                    self._execute_next_pick_step_once,
+                    self._complete_gripper_step_once,
                 )
             return
 
         if step.pose is None:
             self.get_logger().error(f"Pick step {step.name!r} has no target pose.")
-            self._fail_pick_sequence()
+            self._fail_active_step()
             return
 
         if not MOVEIT_ACTIONS_AVAILABLE or self._move_group_client is None:
             self.get_logger().warning(
                 f"Cannot execute {step.name!r}; MoveGroup action support is unavailable."
             )
-            self._fail_pick_sequence()
+            self._fail_active_step()
             return
         if self._move_group_goal_may_be_active:
             self.get_logger().error(
                 "Not sending a new plan because a previous planning or execution goal "
                 "may still be active. Restart the stack before retrying."
             )
-            self._fail_pick_sequence()
+            self._fail_active_step()
             return
 
         if not self._move_group_client.server_is_ready():
@@ -1040,14 +965,13 @@ class MotionPlannerNode(Node):
                     "MoveGroup action server is not available yet; retrying pick step "
                     f"{step.name!r}."
                 )
-                self._retry_current_pick_step()
+                self._retry_current_step()
                 return
-        self._set_planning_request_active(True)
-        if not self._has_planning_turn():
+        if self._peer_motion_active():
             self.get_logger().info(
-                "Planner turn is currently assigned to the peer arm; retrying current pick step."
+                "Peer arm has an active planning/execution goal; retrying current pick step."
             )
-            self._retry_current_pick_step()
+            self._retry_current_step()
             return
 
         goal = self._build_move_group_goal(step)
@@ -1078,22 +1002,32 @@ class MotionPlannerNode(Node):
             )
         )
 
-    def _execute_next_pick_step_once(self) -> None:
+    def _complete_gripper_step_once(self) -> None:
         if self._step_timer is not None:
             self._step_timer.cancel()
             self._step_timer = None
-        self._execute_next_pick_step()
+        self._step_running = False
+        self._set_step_status(self._active_step_command_id, self._active_step_name, "succeeded")
 
-    def _retry_current_pick_step(self) -> None:
-        self._pick_sequence_index = max(self._pick_sequence_index - 1, 0)
+    def _retry_current_step(self) -> None:
         self._step_timer = self.create_timer(
             MOVE_GROUP_SERVER_RETRY_SECONDS,
-            self._execute_next_pick_step_once,
+            self._retry_active_step_once,
         )
 
-    def _fail_pick_sequence(self) -> None:
-        self._pick_in_progress = False
-        self._set_planning_request_active(False)
+    def _fail_active_step(self) -> None:
+        self._step_running = False
+        self._set_step_status(self._active_step_command_id, self._active_step_name, "failed")
+
+    def _retry_active_step_once(self) -> None:
+        if self._step_timer is not None:
+            self._step_timer.cancel()
+            self._step_timer = None
+        self._step_running = False
+        if self._step_status is not None:
+            self._step_status = None
+        self._publish_arm_state()
+        self._try_execute_assigned_step()
 
     def _build_move_group_goal(self, step: MotionStep) -> Any:
         if step.pose is None:
@@ -1372,6 +1306,7 @@ class MotionPlannerNode(Node):
 
         import torch
 
+        self._log_peer_plan_debug_summary()
         collision_objects: list[Any] = []
         proxy_links: set[str] = set()
         for sample_index, position_map in enumerate(self._peer_sweep_position_maps()):
@@ -1420,9 +1355,45 @@ class MotionPlannerNode(Node):
             )
         return collision_objects
 
+    def _log_peer_plan_debug_summary(self) -> None:
+        peer_plan = self._peer_plan_state
+        if not isinstance(peer_plan, dict):
+            self.get_logger().info(
+                f"No peer plan available while planning {self._planning_arm_side} arm."
+            )
+            return
+
+        joint_names = list(peer_plan.get("joint_names") or [])
+        points = list(peer_plan.get("points") or [])
+        published_ns = int(peer_plan.get("published_ns") or 0)
+        final_time = float(peer_plan.get("final_time") or 0.0)
+        if not joint_names or not points or published_ns <= 0:
+            self.get_logger().info(
+                f"Peer plan for {self._other_arm_side} arm is empty or invalid."
+            )
+            return
+
+        now_ns = int(self.get_clock().now().nanoseconds)
+        elapsed = max(0.0, (now_ns - published_ns) * 1e-9)
+        sample_times = self._peer_sweep_sample_times(elapsed, final_time)
+        first_positions = list(points[0].get("positions") or [])
+        last_positions = list(points[-1].get("positions") or [])
+        self.get_logger().info(
+            f"Peer plan debug for {self._other_arm_side} arm before planning "
+            f"{self._planning_arm_side}: "
+            f"points={len(points)}, "
+            f"elapsed={elapsed:.3f}s, final_time={final_time:.3f}s, "
+            f"sample_times={[round(value, 3) for value in sample_times]}"
+        )
+        self.get_logger().info(
+            f"Peer plan endpoints for {self._other_arm_side}: "
+            f"start={self._joint_position_summary(joint_names, first_positions)}, "
+            f"end={self._joint_position_summary(joint_names, last_positions)}"
+        )
+
     def _peer_sweep_position_maps(self) -> list[dict[str, float]]:
         current_positions = self._latest_joint_position_map()
-        peer_plan = self._peer_state().get("plan")
+        peer_plan = self._peer_plan_state
         if not isinstance(peer_plan, dict):
             return [current_positions]
 
@@ -1468,6 +1439,16 @@ class MotionPlannerNode(Node):
                 strict=False,
             )
         }
+
+    def _joint_position_summary(
+        self,
+        joint_names: list[str],
+        positions: list[float],
+    ) -> str:
+        return ", ".join(
+            f"{joint_name}={float(position):.4f}"
+            for joint_name, position in zip(joint_names, positions, strict=False)
+        )
 
     def _peer_sweep_sample_times(self, elapsed: float, final_time: float) -> list[float]:
         if self._other_arm_sweep_sample_count <= 1 or final_time <= elapsed:
@@ -1607,9 +1588,8 @@ class MotionPlannerNode(Node):
                         "profile": request_profile,
                     },
                 )
-                self._pick_in_progress = False
-                self._set_planning_request_active(False)
-                # self._release_latched_target("failed MoveGroup goal response")
+                self._step_running = False
+                self._set_step_status(self._active_step_command_id, self._active_step_name, "failed")
             return
         if not goal_handle.accepted:
             self.get_logger().error(f"MoveGroup rejected pick step {step.name!r}.")
@@ -1621,9 +1601,8 @@ class MotionPlannerNode(Node):
                     "profile": request_profile,
                 },
             )
-            self._pick_in_progress = False
-            self._set_planning_request_active(False)
-            # self._release_latched_target("rejected MoveGroup goal")
+            self._step_running = False
+            self._set_step_status(self._active_step_command_id, self._active_step_name, "failed")
             return
 
         self.get_logger().info(
@@ -1696,9 +1675,8 @@ class MotionPlannerNode(Node):
                     "profile": self._active_move_request_profile,
                 },
             )
-            self._pick_in_progress = False
-            self._set_planning_request_active(False)
-            # self._release_latched_target("failed MoveGroup result")
+            self._step_running = False
+            self._set_step_status(self._active_step_command_id, self._active_step_name, "failed")
             return
         action_status = getattr(action_result, "status", None)
         error_code = getattr(getattr(result, "error_code", None), "val", 1)
@@ -1742,9 +1720,9 @@ class MotionPlannerNode(Node):
                     "profile": self._active_move_request_profile,
                 },
             )
-            self._pick_in_progress = False
-            self._set_planning_request_active(False)
+            self._step_running = False
             self._clear_active_move_observability()
+            self._set_step_status(self._active_step_command_id, self._active_step_name, "failed")
             if error_code in RELEASE_TARGET_ON_MOVEIT_ERROR_CODES:
                 self._release_latched_target("failed MoveGroup plan")
             return
@@ -1763,7 +1741,7 @@ class MotionPlannerNode(Node):
         self._publish_display_trajectory(planned_trajectory)
         self._log_planned_trajectory_collisions(step, planned_trajectory)
         self._current_plan_state = self._planned_trajectory_state(planned_trajectory)
-        self._set_planning_request_active(False, publish=False)
+        self._publish_peer_plan_state()
         self._publish_arm_state()
         self._write_move_group_debug_artifact(
             self._active_move_request_id,
@@ -1783,15 +1761,16 @@ class MotionPlannerNode(Node):
         )
         if self._plan_only:
             self._clear_active_move_observability()
-            self._execute_next_pick_step()
+            self._step_running = False
+            self._set_step_status(self._active_step_command_id, self._active_step_name, "succeeded")
             return
         if planned_points <= 0 or planned_trajectory is None:
             self.get_logger().error(
                 f"MoveGroup returned no planned trajectory for pick step {step.name!r}."
             )
-            self._pick_in_progress = False
-            self._set_planning_request_active(False)
+            self._step_running = False
             self._clear_active_move_observability()
+            self._set_step_status(self._active_step_command_id, self._active_step_name, "failed")
             self._release_latched_target("empty MoveGroup plan")
             return
         self._send_direct_trajectory(step, planned_trajectory, generation)
@@ -1821,7 +1800,7 @@ class MotionPlannerNode(Node):
     def _collision_position_map(self) -> dict[str, float]:
         return merged_position_map(
             self._latest_joint_state,
-            self._peer_state().get("plan"),
+            self._peer_plan_state,
             int(self.get_clock().now().nanoseconds),
             self._peer_plan_extra_horizon_seconds,
         )
@@ -2185,7 +2164,7 @@ class MotionPlannerNode(Node):
             self.get_logger().error(
                 f"Cannot execute {step.name!r}; direct trajectory action support is unavailable."
             )
-            self._pick_in_progress = False
+            self._step_running = False
             self._clear_active_move_observability()
             return
         if not self._direct_trajectory_client.server_is_ready():
@@ -2197,7 +2176,7 @@ class MotionPlannerNode(Node):
                     "Direct trajectory action server is not available; cannot execute "
                     f"pick step {step.name!r}."
                 )
-                self._pick_in_progress = False
+                self._step_running = False
                 self._clear_active_move_observability()
                 return
 
@@ -2213,6 +2192,7 @@ class MotionPlannerNode(Node):
             f"request_id={self._active_move_request_id}."
         )
         self._move_group_goal_may_be_active = True
+        self._publish_arm_state()
         self._active_move_step_name = f"{step.name} direct execution"
         self._active_move_started_monotonic = time.monotonic()
         timeout = self._direct_trajectory_result_timeout
@@ -2255,15 +2235,17 @@ class MotionPlannerNode(Node):
             self.get_logger().error(
                 f"Direct trajectory goal response failed for pick step {step.name!r}: {error}"
             )
-            self._pick_in_progress = False
+            self._step_running = False
             self._clear_direct_trajectory_observability()
+            self._set_step_status(self._active_step_command_id, self._active_step_name, "failed")
             return
         if not goal_handle.accepted:
             self.get_logger().error(
                 f"Direct trajectory action rejected pick step {step.name!r}."
             )
-            self._pick_in_progress = False
+            self._step_running = False
             self._clear_direct_trajectory_observability()
+            self._set_step_status(self._active_step_command_id, self._active_step_name, "failed")
             return
         self._active_goal_handle = goal_handle
         result_future = goal_handle.get_result_async()
@@ -2290,8 +2272,9 @@ class MotionPlannerNode(Node):
             self.get_logger().error(
                 f"Direct trajectory result failed for pick step {step.name!r}: {error}"
             )
-            self._pick_in_progress = False
+            self._step_running = False
             self._clear_direct_trajectory_observability()
+            self._set_step_status(self._active_step_command_id, self._active_step_name, "failed")
             return
         status = getattr(action_result, "status", None)
         error_code = int(getattr(result, "error_code", -1))
@@ -2302,8 +2285,9 @@ class MotionPlannerNode(Node):
                 f"error_code={error_code}, action_status={status}, "
                 f"error={error_string}, request_id={self._active_move_request_id}."
             )
-            self._pick_in_progress = False
+            self._step_running = False
             self._clear_direct_trajectory_observability()
+            self._set_step_status(self._active_step_command_id, self._active_step_name, "failed")
             return
         self.get_logger().info(
             f"Direct trajectory completed pick step {step.name!r}: "
@@ -2322,7 +2306,8 @@ class MotionPlannerNode(Node):
         self._current_plan_state = None
         self._publish_arm_state()
         self._clear_direct_trajectory_observability()
-        self._execute_next_pick_step()
+        self._step_running = False
+        self._set_step_status(self._active_step_command_id, self._active_step_name, "succeeded")
 
     def _handle_direct_trajectory_timeout(
         self,
@@ -2337,7 +2322,7 @@ class MotionPlannerNode(Node):
             else self._direct_trajectory_result_timeout
         )
         self._pick_generation += 1
-        self._pick_in_progress = False
+        self._step_running = False
         self._active_goal_handle = None
         self.get_logger().error(
             f"Direct trajectory did not return a result for pick step {step.name!r} "
@@ -2355,6 +2340,7 @@ class MotionPlannerNode(Node):
             },
         )
         self._clear_direct_trajectory_observability()
+        self._set_step_status(self._active_step_command_id, self._active_step_name, "failed")
 
     def _log_actual_vs_planned_collision_waypoint(self, step: MotionStep) -> None:
         if (
@@ -2422,10 +2408,8 @@ class MotionPlannerNode(Node):
             else self._move_group_result_timeout
         )
         self._pick_generation += 1
-        self._pick_in_progress = False
+        self._step_running = False
         self._active_goal_handle = None
-        self._set_planning_request_active(False, publish=False)
-        # self._release_latched_target("timed-out MoveGroup")
         self.get_logger().error(
             f"MoveGroup did not return a result for pick step {step.name!r} within "
             f"{self._move_group_result_timeout:.1f}s "
@@ -2446,9 +2430,9 @@ class MotionPlannerNode(Node):
         )
         self._move_group_goal_may_be_active = False
         self._current_plan_state = None
-        self._set_planning_request_active(False, publish=False)
         self._publish_arm_state()
         self._clear_active_move_observability()
+        self._set_step_status(self._active_step_command_id, self._active_step_name, "failed")
 
     def _log_active_move_wait(self) -> None:
         if not self._move_group_goal_may_be_active or not self._active_move_step_name:

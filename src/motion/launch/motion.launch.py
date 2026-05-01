@@ -11,7 +11,6 @@ def generate_launch_description() -> LaunchDescription:
     launch_left_planner = LaunchConfiguration("launch_left_planner")
     pipeline_id = LaunchConfiguration("pipeline_id")
     planner_id = LaunchConfiguration("planner_id")
-    target_pose_topic = LaunchConfiguration("target_pose_topic")
     plan_only = LaunchConfiguration("plan_only")
     move_group_result_timeout = LaunchConfiguration("move_group_result_timeout")
     direct_trajectory_result_timeout = LaunchConfiguration(
@@ -54,11 +53,6 @@ def generate_launch_description() -> LaunchDescription:
                 "planner_id",
                 default_value="cuMotion",
                 description="Planner identifier for MoveIt requests.",
-            ),
-            DeclareLaunchArgument(
-                "target_pose_topic",
-                default_value="/motion/target_pose",
-                description="PoseStamped topic to consume motion targets from.",
             ),
             DeclareLaunchArgument(
                 "plan_only",
@@ -141,7 +135,6 @@ def generate_launch_description() -> LaunchDescription:
                         "planning_arm_side": "right",
                         "pipeline_id": pipeline_id,
                         "planner_id": planner_id,
-                        "target_pose_topic": target_pose_topic,
                         "move_group_action": "/moveit_right/move_action",
                         "planning_scene_service": "/moveit_right/get_planning_scene",
                         "planning_scene_topic": "/moveit_right/planning_scene",
@@ -168,7 +161,6 @@ def generate_launch_description() -> LaunchDescription:
                         "planning_arm_side": "left",
                         "pipeline_id": pipeline_id,
                         "planner_id": planner_id,
-                        "target_pose_topic": target_pose_topic,
                         "move_group_action": "/moveit_left/move_action",
                         "planning_scene_service": "/moveit_left/get_planning_scene",
                         "planning_scene_topic": "/moveit_left/planning_scene",

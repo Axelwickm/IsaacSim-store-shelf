@@ -16,24 +16,6 @@ def is_arm_link(link_name: str, arm_config: ArmSideConfig) -> bool:
     return link_name.startswith(arm_config.gripper_prefix)
 
 
-def reserved_point_distance(
-    reserved_point: dict[str, Any] | None,
-    frame_id: str,
-    xyz: tuple[float, float, float],
-) -> float | None:
-    if not reserved_point:
-        return None
-    if reserved_point.get("frame_id") != frame_id:
-        return None
-    reserved_xyz = reserved_point.get("xyz") or []
-    if len(reserved_xyz) != 3:
-        return None
-    dx = float(xyz[0]) - float(reserved_xyz[0])
-    dy = float(xyz[1]) - float(reserved_xyz[1])
-    dz = float(xyz[2]) - float(reserved_xyz[2])
-    return (dx * dx + dy * dy + dz * dz) ** 0.5
-
-
 def serialize_planned_trajectory(
     planned_trajectory: Any | None,
     stamp_ns: int,

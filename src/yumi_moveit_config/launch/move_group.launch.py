@@ -181,6 +181,7 @@ def _build_launch_entities(context):
     apply_planning_scene_service = _namespaced_service(
         move_group_namespace, "apply_planning_scene"
     )
+    planning_scene_topic = _namespaced_service(move_group_namespace, "planning_scene")
     namespace_value = move_group_namespace or None
 
     move_group_node = Node(
@@ -213,11 +214,7 @@ def _build_launch_entities(context):
                 "cumotion_scene_service": (
                     "/publish_static_planning_scene" if launch_runtime_support else ""
                 ),
-                "planning_scene_topics": [
-                    "/planning_scene",
-                    "/moveit_left/planning_scene",
-                    "/moveit_right/planning_scene",
-                ],
+                "planning_scene_topics": [planning_scene_topic],
             }
         ],
     )
@@ -327,12 +324,8 @@ def _build_launch_entities(context):
 
     start_stack_actions = [move_group_node]
     if cumotion_enabled:
-        start_stack_actions.append(
-            TimerAction(period=2.0, actions=[cumotion_planner_launch])
-        )
-    start_stack_actions.append(
-        TimerAction(period=2.0, actions=[static_planning_scene_node])
-    )
+        start_stack_actions.append(cumotion_planner_launch)
+    start_stack_actions.append(static_planning_scene_node)
     if launch_runtime_support:
         launch_entities.append(
             RegisterEventHandler(

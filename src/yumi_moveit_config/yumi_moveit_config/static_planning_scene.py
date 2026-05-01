@@ -58,13 +58,14 @@ class StaticPlanningSceneNode(Node):
         )
         self._timer = self.create_timer(0.5, self._apply_once)
         self._applied = False
+        self._apply_in_flight = False
         if self._cumotion_scene_service:
             self.get_logger().info(
                 f"Serving cuMotion static planning scene on {self._cumotion_scene_service}"
             )
 
     def _apply_once(self) -> None:
-        if self._applied:
+        if self._applied or self._apply_in_flight:
             return
         if not self._client.service_is_ready():
             self.get_logger().info(f"Waiting for {self._apply_service}")
@@ -77,8 +78,7 @@ class StaticPlanningSceneNode(Node):
         request.scene = scene
         future = self._client.call_async(request)
         future.add_done_callback(self._handle_apply_result)
-        self._applied = True
-        self._timer.cancel()
+        self._apply_in_flight = True
 
     def _handle_cumotion_scene_request(
         self,
@@ -137,15 +137,20 @@ class StaticPlanningSceneNode(Node):
         return collision_objects
 
     def _handle_apply_result(self, future) -> None:
+        self._apply_in_flight = False
         try:
             response = future.result()
         except Exception as exc:
             self.get_logger().error(f"Failed to apply static planning scene: {exc}")
             return
         if response.success:
+            self._applied = True
+            self._timer.cancel()
             self.get_logger().info("Applied static shelf collision objects")
         else:
-            self.get_logger().error("MoveIt rejected static shelf collision objects")
+            self.get_logger().warning(
+                "MoveIt rejected static shelf collision objects; will retry"
+            )
 
 
 def main() -> None:

@@ -22,11 +22,10 @@ from .scene_construction import (
 )
 from .vision_panel import DEFAULT_DEBUG_IMAGE_TOPIC, IsaacSimVisionPanel
 from .target_marker_visualizer import (
-    DEFAULT_CLEAR_LATCHED_TARGET_TOPIC,
     DEFAULT_DEBUG_DRAW_CROSSHAIR_SIZE_METERS,
     DEFAULT_DEBUG_DRAW_RADIUS_PIXELS,
-    DEFAULT_LATCHED_TARGET_POINT_TOPIC,
     DEFAULT_MARKER_RADIUS_METERS,
+    DEFAULT_SELECTED_ITEM_POINT_TOPIC,
     IsaacSimTargetMarkerVisualizer,
 )
 
@@ -546,12 +545,11 @@ def _setup_store_shelf_scene(
         not in {"0", "false", "no", "off"}
     ):
         target_topic = os.environ.get(
-            "ISAACSIM_LATCHED_TARGET_POINT_TOPIC",
-            DEFAULT_LATCHED_TARGET_POINT_TOPIC,
-        ).strip()
-        clear_topic = os.environ.get(
-            "ISAACSIM_CLEAR_LATCHED_TARGET_TOPIC",
-            DEFAULT_CLEAR_LATCHED_TARGET_TOPIC,
+            "ISAACSIM_TARGET_MARKER_TOPIC",
+            os.environ.get(
+                "ISAACSIM_LATCHED_TARGET_POINT_TOPIC",
+                DEFAULT_SELECTED_ITEM_POINT_TOPIC,
+            ),
         ).strip()
         marker_radius = float(
             os.environ.get(
@@ -578,15 +576,14 @@ def _setup_store_shelf_scene(
             rclpy.init(args=None)
         _target_marker_visualizer = IsaacSimTargetMarkerVisualizer(
             target_topic_name=target_topic,
-            clear_topic_name=clear_topic,
             marker_radius_meters=marker_radius,
             debug_draw_radius_pixels=debug_draw_radius,
             debug_draw_crosshair_size_meters=debug_draw_crosshair_size,
             max_markers=max_markers,
         )
         print(
-            "[store_shelf] Enabled Isaac Sim latched target markers "
-            f"target_topic={target_topic} clear_topic={clear_topic} "
+            "[store_shelf] Enabled Isaac Sim target markers "
+            f"target_topic={target_topic} "
             f"radius={marker_radius:.3f}m debug_draw_radius={debug_draw_radius:.1f}px "
             f"crosshair={debug_draw_crosshair_size:.3f}m max_markers={max_markers}",
             flush=True,

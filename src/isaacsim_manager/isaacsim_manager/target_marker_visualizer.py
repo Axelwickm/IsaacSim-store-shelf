@@ -1,11 +1,10 @@
 from geometry_msgs.msg import PointStamped
 from rclpy.executors import SingleThreadedExecutor
 from rclpy.node import Node
-from std_msgs.msg import Empty
 
 
 DEFAULT_LATCHED_TARGET_POINT_TOPIC = "/motion/latched_target_point"
-DEFAULT_CLEAR_LATCHED_TARGET_TOPIC = "/motion/clear_latched_target"
+DEFAULT_SELECTED_ITEM_POINT_TOPIC = "/vision/selected_item_point"
 DEFAULT_MARKER_ROOT_PATH = "/LatchedTargetMarker"
 DEFAULT_MARKER_RADIUS_METERS = 0.035
 DEFAULT_DEBUG_DRAW_RADIUS_PIXELS = 18.0
@@ -16,8 +15,7 @@ DEFAULT_MAX_MARKERS = 20
 class IsaacSimTargetMarkerVisualizer:
     def __init__(
         self,
-        target_topic_name: str = DEFAULT_LATCHED_TARGET_POINT_TOPIC,
-        clear_topic_name: str = DEFAULT_CLEAR_LATCHED_TARGET_TOPIC,
+        target_topic_name: str = DEFAULT_SELECTED_ITEM_POINT_TOPIC,
         marker_root_path: str = DEFAULT_MARKER_ROOT_PATH,
         marker_radius_meters: float = DEFAULT_MARKER_RADIUS_METERS,
         debug_draw_radius_pixels: float = DEFAULT_DEBUG_DRAW_RADIUS_PIXELS,
@@ -25,7 +23,6 @@ class IsaacSimTargetMarkerVisualizer:
         max_markers: int = DEFAULT_MAX_MARKERS,
     ) -> None:
         self._target_topic_name = target_topic_name
-        self._clear_topic_name = clear_topic_name
         self._marker_root_path = marker_root_path
         self._marker_radius_meters = marker_radius_meters
         self._debug_draw_radius_pixels = debug_draw_radius_pixels
@@ -37,7 +34,6 @@ class IsaacSimTargetMarkerVisualizer:
         self._debug_draw = None
         self._debug_draw_checked = False
         self._pending_points: list[PointStamped] = []
-        self._pending_clear = False
         self._executor = SingleThreadedExecutor()
         self._node = Node("isaacsim_latched_target_marker")
         self._executor.add_node(self._node)
@@ -47,25 +43,12 @@ class IsaacSimTargetMarkerVisualizer:
             self._handle_target_point,
             10,
         )
-        self._clear_subscription = self._node.create_subscription(
-            Empty,
-            clear_topic_name,
-            self._handle_clear,
-            10,
-        )
 
     def _handle_target_point(self, message: PointStamped) -> None:
         self._pending_points.append(message)
 
-    def _handle_clear(self, _message: Empty) -> None:
-        self._pending_clear = True
-
     def update(self) -> None:
         self._executor.spin_once(timeout_sec=0.0)
-        if self._pending_clear:
-            self._clear_markers()
-            self._pending_clear = False
-
         while self._pending_points:
             self._add_marker(self._pending_points.pop(0))
 
@@ -77,7 +60,7 @@ class IsaacSimTargetMarkerVisualizer:
     def _add_marker(self, message: PointStamped) -> None:
         if message.header.frame_id not in {"", "world"}:
             self._node.get_logger().warning(
-                "Latched target marker expects world-frame points; "
+                "Target marker expects world-frame points; "
                 f"got {message.header.frame_id!r}. Drawing it as stage coordinates."
             )
 
@@ -106,7 +89,7 @@ class IsaacSimTargetMarkerVisualizer:
         self._redraw_debug_markers()
 
         self._node.get_logger().info(
-            "Added Isaac Sim latched target debug marker "
+            "Added Isaac Sim target debug marker "
             f"name={marker_name} point=({message.point.x:.3f}, "
             f"{message.point.y:.3f}, {message.point.z:.3f})"
         )
