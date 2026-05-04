@@ -69,6 +69,7 @@ YUMI_STORE_DEMO_READY_JOINT_POSITIONS_RAD = {
 DEFAULT_ARM_DRIVE_STIFFNESS = 6000.0
 DEFAULT_ARM_DRIVE_DAMPING = 1000.0
 DEFAULT_ARM_DRIVE_MAX_FORCE = 5000.0
+DEFAULT_STORE_DEMO_ARM_RANDOMIZATION_DELTA_RAD = 0.35
 
 
 def find_prim_named(stage, name: str):
@@ -896,6 +897,30 @@ def set_robot_arm_joints_for_planning(stage, robot_prim_path: str) -> dict[str, 
         robot_prim_path,
         YUMI_STORE_DEMO_READY_JOINT_POSITIONS_RAD,
         label="Set robot arm joints to store_demo_ready pose",
+    )
+
+
+def randomize_store_demo_robot_arm_joints(stage, robot_prim_path: str) -> dict[str, float]:
+    perturbation_delta = float_env(
+        "ISAACSIM_STORE_DEMO_ARM_RANDOMIZATION_DELTA_RAD",
+        DEFAULT_STORE_DEMO_ARM_RANDOMIZATION_DELTA_RAD,
+    )
+    sampled_positions = {}
+    for joint_name, ready_position in YUMI_STORE_DEMO_READY_JOINT_POSITIONS_RAD.items():
+        lower_limit, upper_limit = YUMI_ARM_JOINT_LIMITS_RAD[joint_name]
+        sampled_position = ready_position + random.uniform(
+            -perturbation_delta,
+            perturbation_delta,
+        )
+        sampled_positions[joint_name] = max(
+            lower_limit,
+            min(upper_limit, sampled_position),
+        )
+    return set_robot_arm_joints(
+        stage,
+        robot_prim_path,
+        sampled_positions,
+        label="Randomized store_demo robot arm joints",
     )
 
 

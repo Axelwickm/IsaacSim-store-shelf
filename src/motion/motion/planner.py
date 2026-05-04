@@ -205,6 +205,7 @@ class MotionPlannerNode(Node):
         self.declare_parameter("max_acceleration_scaling_factor", 0.2)
         self.declare_parameter("arm_state_topic", "/motion/arm_state")
         self.declare_parameter("coordinator_state_topic", "/motion/coordinator_state")
+        self.declare_parameter("reset_topic", "/motion/reset")
         self.declare_parameter("peer_plan_topic", "/motion/peer_plan")
         self.declare_parameter("peer_plan_extra_horizon_seconds", 2.0)
 
@@ -273,6 +274,7 @@ class MotionPlannerNode(Node):
         self._coordinator_state_topic = str(
             self.get_parameter("coordinator_state_topic").value
         )
+        self._reset_topic = str(self.get_parameter("reset_topic").value)
         self._peer_plan_topic = str(self.get_parameter("peer_plan_topic").value)
         self._peer_plan_extra_horizon_seconds = max(
             float(self.get_parameter("peer_plan_extra_horizon_seconds").value),
@@ -405,6 +407,7 @@ class MotionPlannerNode(Node):
         self._active_step_command_id = 0
         self._active_step_name = ""
         self._step_status: dict[str, Any] | None = None
+        self._last_plan_outcome: dict[str, Any] | None = None
         self._joint_command_publisher = self.create_publisher(
             JointState,
             joint_command_topic,
@@ -480,6 +483,12 @@ class MotionPlannerNode(Node):
             self._handle_coordinator_state,
             10,
         )
+        self._reset_subscription = self.create_subscription(
+            String,
+            self._reset_topic,
+            self._handle_reset,
+            10,
+        )
         self._peer_plan_subscription = self.create_subscription(
             String,
             self._peer_plan_topic,
@@ -505,6 +514,7 @@ class MotionPlannerNode(Node):
         self.get_logger().info(
             f"Arm state topic: {self._arm_state_topic}; "
             f"coordinator state topic: {self._coordinator_state_topic}; "
+            f"reset topic: {self._reset_topic}; "
             f"peer plan topic: {self._peer_plan_topic}"
         )
         if self._required_planning_scene_object_ids:
@@ -591,6 +601,7 @@ class MotionPlannerNode(Node):
         point = self._assigned_world_point.point
         self._assigned_world_point = None
         self._pending_pick_point = None
+        self._last_plan_outcome = None
         self._publish_arm_state()
         self.get_logger().info(
             f"Released {reason} target at "
@@ -618,6 +629,17 @@ class MotionPlannerNode(Node):
         if arm_side != self._other_arm_side:
             return
         self._peer_plan_state = payload
+
+    def _handle_reset(self, message: String) -> None:
+        payload = decode_payload(message)
+        reset_reason = ""
+        if isinstance(payload, dict):
+            reset_reason = str(payload.get("reason", "")).strip()
+        self._clear_for_episode_reset()
+        self.get_logger().info(
+            "Received motion reset"
+            + (f" reason={reset_reason}" if reset_reason else "")
+        )
 
     def _sync_assigned_target_from_coordinator(self) -> None:
         assigned_target = self._assigned_target_for_self()
@@ -647,6 +669,36 @@ class MotionPlannerNode(Node):
         self._pending_pick_point = None
         self._publish_arm_state()
 
+    def _clear_for_episode_reset(self) -> None:
+        self._pick_generation += 1
+        if self._pending_pick_retry_timer is not None:
+            self._pending_pick_retry_timer.cancel()
+            self._pending_pick_retry_timer = None
+        if self._step_timer is not None:
+            self._step_timer.cancel()
+            self._step_timer = None
+        if self._move_result_timer is not None:
+            self._move_result_timer.cancel()
+            self._move_result_timer = None
+        if self._move_observability_timer is not None:
+            self._move_observability_timer.cancel()
+            self._move_observability_timer = None
+        self._assigned_world_point = None
+        self._pending_pick_point = None
+        self._coordinator_state = {"arms": {}}
+        self._current_plan_state = None
+        self._peer_plan_state = None
+        self._step_status = None
+        self._last_plan_outcome = None
+        self._step_running = False
+        self._move_group_goal_may_be_active = False
+        self._active_goal_handle = None
+        self._active_step_command_id = 0
+        self._active_step_name = ""
+        self._active_move_started_monotonic = 0.0
+        self._clear_active_move_observability()
+        self._publish_arm_state()
+
     def _publish_arm_state(self) -> None:
         self._arm_state_publisher.publish(encode_payload(self._arm_state_payload()))
 
@@ -654,6 +706,8 @@ class MotionPlannerNode(Node):
         return {
             "arm_side": self._planning_arm_side,
             "stamp_ns": int(self.get_clock().now().nanoseconds),
+            "assigned_target": self._assigned_target_for_self(),
+            "plan_outcome": self._last_plan_outcome,
             "step_status": self._step_status,
             "motion_active": bool(self._move_group_goal_may_be_active),
         }
@@ -721,6 +775,35 @@ class MotionPlannerNode(Node):
             "command_id": int(command_id),
             "name": str(name),
             "state": str(state),
+        }
+        self._publish_arm_state()
+
+    def _record_plan_outcome(
+        self,
+        *,
+        step_name: str,
+        success: bool,
+        request_id: str,
+        error_code: int,
+        error_name: str,
+        action_status: Any,
+        planning_time: float,
+        planned_points: int,
+    ) -> None:
+        assigned_target = self._assigned_target_for_self() or {}
+        self._last_plan_outcome = {
+            "arm_side": self._planning_arm_side,
+            "candidate_id": str(assigned_target.get("candidate_id", "")).strip(),
+            "query_index": int(assigned_target.get("query_index") or -1),
+            "step_name": str(step_name),
+            "success": bool(success),
+            "request_id": str(request_id),
+            "error_code": int(error_code),
+            "error_name": str(error_name),
+            "action_status": action_status,
+            "planning_time": float(planning_time),
+            "planned_points": int(planned_points),
+            "stamp_ns": int(self.get_clock().now().nanoseconds),
         }
         self._publish_arm_state()
 
@@ -804,6 +887,8 @@ class MotionPlannerNode(Node):
         self._active_step_name = command_name
         self._step_running = True
         self._set_step_status(command_id, command_name, "running")
+        self._last_plan_outcome = None
+        self._publish_arm_state()
         self.get_logger().info(
             f"Executing assigned step {command_name!r} for {self._planning_arm_side} arm "
             f"(command_id={command_id})."
@@ -1726,6 +1811,16 @@ class MotionPlannerNode(Node):
         )
         planned_trajectory = getattr(result, "planned_trajectory", None)
         if error_code != 1:
+            self._record_plan_outcome(
+                step_name=step.name,
+                success=False,
+                request_id=self._active_move_request_id,
+                error_code=error_code,
+                error_name=error_name,
+                action_status=action_status,
+                planning_time=planning_time,
+                planned_points=planned_points,
+            )
             self.get_logger().error(
                 f"MoveGroup failed pick step {step.name!r}: "
                 f"error={error_name} ({error_code}), action_status={action_status}, "
@@ -1772,6 +1867,16 @@ class MotionPlannerNode(Node):
         self._log_planned_trajectory_collisions(step, planned_trajectory)
         self._current_plan_state = self._planned_trajectory_state(planned_trajectory)
         self._publish_peer_plan_state()
+        self._record_plan_outcome(
+            step_name=step.name,
+            success=True,
+            request_id=self._active_move_request_id,
+            error_code=error_code,
+            error_name=error_name,
+            action_status=action_status,
+            planning_time=planning_time,
+            planned_points=planned_points,
+        )
         self._publish_arm_state()
         self._write_move_group_debug_artifact(
             self._active_move_request_id,
@@ -2698,9 +2803,12 @@ def main() -> None:
     node = MotionPlannerNode()
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

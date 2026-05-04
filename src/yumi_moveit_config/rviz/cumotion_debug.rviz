@@ -60,6 +60,19 @@ Visualization Manager:
       Name: cuMotion Voxels
       Queue Size: 10
       Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Topic:
+        Depth: 10
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /vision/suggested_item_markers
+      Name: Vision Suggested Items
+      Namespaces:
+        vision_suggested_items: true
+      Queue Size: 10
+      Value: true
     - Class: moveit_rviz_plugin/MotionPlanning
       Enabled: false
       Name: MotionPlanning

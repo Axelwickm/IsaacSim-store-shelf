@@ -148,6 +148,7 @@ RUN python3 -m pip install --no-cache-dir --break-system-packages --ignore-insta
 RUN python3 -m pip install --no-cache-dir --break-system-packages \
     "numpy<2" \
     scipy \
+    tensorboard \
     trimesh \
     yourdfpy \
     warp-lang

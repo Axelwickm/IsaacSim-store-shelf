@@ -7,7 +7,6 @@ NUM_QUERIES = 64
 LATENT_DIM = 4
 PATCH_SIZE = 32
 HIDDEN_DIM = 96
-IDENTITY_ALPHA_EPSILON = 0.5
 
 
 class QueryDepthIdentityModel(nn.Module):
@@ -29,149 +28,36 @@ class QueryDepthIdentityModel(nn.Module):
         self.slot_head = nn.Sequential(
             nn.Linear(HIDDEN_DIM, HIDDEN_DIM),
             nn.ReLU(inplace=True),
-            nn.Linear(HIDDEN_DIM, 8 + LATENT_DIM),
-        )
-        self.patch_decoder = nn.Sequential(
-            nn.Linear(LATENT_DIM, 64),
-            nn.ReLU(inplace=True),
-            nn.Linear(64, PATCH_SIZE * PATCH_SIZE),
+            nn.Linear(HIDDEN_DIM, 10 + LATENT_DIM),
         )
 
     def forward(self, pixel_values):
         features = self.backbone(pixel_values)
         features = self.feature_proj(features)
-        batch_size, _, height, width = features.shape
+        batch_size = features.shape[0]
         tokens = features.flatten(2).transpose(1, 2)
         queries = self.query_embed.unsqueeze(0).expand(batch_size, -1, -1)
         decoded = self.decoder(queries, tokens)
         slot_params = self.slot_head(decoded)
 
+        presence_logits = slot_params[..., 0:1]
         centers = torch.tanh(slot_params[..., 1:3])
         depth = torch.sigmoid(slot_params[..., 3:4]) * 5.0
         sizes = torch.sigmoid(slot_params[..., 4:6]) * 0.08 + 0.015
-        alpha_scale = torch.sigmoid(slot_params[..., 6:7])
-        depth_scale = torch.sigmoid(slot_params[..., 7:8])
-        latent = slot_params[..., 8:]
-        patch_alpha_logits = self.patch_decoder(latent).view(
-            batch_size, NUM_QUERIES, PATCH_SIZE, PATCH_SIZE
-        )
-        patch_alpha = (
-            ((torch.tanh(patch_alpha_logits) + 1.0) * 0.5)
-            * alpha_scale.squeeze(-1).unsqueeze(-1).unsqueeze(-1)
-        )
-
-        rendered_identity, rendered_depth, rendered_occupancy = render_billboards(
-            patch_alpha=patch_alpha,
-            centers=centers,
-            depth=depth,
-            sizes=sizes,
-            depth_scale=depth_scale,
-            image_height=pixel_values.shape[-2],
-            image_width=pixel_values.shape[-1],
-        )
+        auxiliary = slot_params[..., 6:8]
+        value_logits = slot_params[..., 8:10]
+        latent = slot_params[..., 10:]
         return {
+            "presence_logits": presence_logits,
+            "presence_probs": torch.sigmoid(presence_logits),
             "centers": centers,
             "depth": depth,
             "sizes": sizes,
-            "patch_alpha_logits": patch_alpha_logits,
-            "patch_alpha": patch_alpha,
-            "predicted_identity": rendered_identity,
-            "predicted_depth": rendered_depth,
-            "predicted_occupancy": rendered_occupancy,
+            "auxiliary": auxiliary,
+            "latent": latent,
+            "value_logits": value_logits,
+            "value_probs": torch.sigmoid(value_logits),
         }
-
-
-def render_billboards(
-    patch_alpha,
-    centers,
-    depth,
-    sizes,
-    depth_scale,
-    image_height: int,
-    image_width: int,
-):
-    device = patch_alpha.device
-    batch_size, num_queries, patch_h, patch_w = patch_alpha.shape
-    ys = torch.linspace(-1.0, 1.0, image_height, device=device)
-    xs = torch.linspace(-1.0, 1.0, image_width, device=device)
-    grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
-    grid_x = grid_x.view(1, 1, image_height, image_width)
-    grid_y = grid_y.view(1, 1, image_height, image_width)
-
-    centers_x = centers[..., 0].view(batch_size, num_queries, 1, 1)
-    centers_y = centers[..., 1].view(batch_size, num_queries, 1, 1)
-    sizes_x = sizes[..., 0].view(batch_size, num_queries, 1, 1)
-    sizes_y = sizes[..., 1].view(batch_size, num_queries, 1, 1)
-
-    local_x = ((grid_x - centers_x) / sizes_x).clamp(-1.1, 1.1)
-    local_y = ((grid_y - centers_y) / sizes_y).clamp(-1.1, 1.1)
-    sample_grid = torch.stack([local_x, local_y], dim=-1).view(
-        batch_size * num_queries, image_height, image_width, 2
-    )
-    sampled_alpha = torch.nn.functional.grid_sample(
-        patch_alpha.view(batch_size * num_queries, 1, patch_h, patch_w),
-        sample_grid,
-        mode="bilinear",
-        padding_mode="zeros",
-        align_corners=True,
-    ).view(batch_size, num_queries, image_height, image_width)
-
-    sorted_indices = torch.argsort(depth.squeeze(-1), dim=1, descending=True)
-    sorted_alpha = torch.gather(
-        sampled_alpha,
-        1,
-        sorted_indices[:, :, None, None].expand(-1, -1, image_height, image_width),
-    )
-    sorted_depth = torch.gather(depth, 1, sorted_indices[:, :, None])
-    sorted_depth = sorted_depth.unsqueeze(-1).expand(-1, -1, image_height, image_width)
-    identity_indices = torch.argsort(depth.squeeze(-1), dim=1, descending=False)
-    identity_alpha = torch.gather(
-        sampled_alpha,
-        1,
-        identity_indices[:, :, None, None].expand(-1, -1, image_height, image_width),
-    )
-    identity_labels = (
-        identity_indices.to(sampled_alpha.dtype)[:, :, None, None].expand(
-            -1, -1, image_height, image_width
-        )
-        + 1.0
-    )
-
-    rendered_identity = torch.zeros(
-        batch_size, image_height, image_width, device=device, dtype=sampled_alpha.dtype
-    )
-    rendered_depth = torch.zeros(
-        batch_size, image_height, image_width, device=device, dtype=sampled_alpha.dtype
-    )
-    transmittance = torch.ones(
-        batch_size, image_height, image_width, device=device, dtype=sampled_alpha.dtype
-    )
-    remaining_identity = torch.ones(
-        batch_size, image_height, image_width, device=device, dtype=sampled_alpha.dtype
-    )
-
-    for query_index in range(num_queries):
-        alpha = sorted_alpha[:, query_index]
-        contribution = alpha * transmittance
-        rendered_depth = rendered_depth + contribution * sorted_depth[:, query_index]
-        transmittance = transmittance * (1.0 - alpha)
-
-        claim_strength = identity_alpha[:, query_index] * remaining_identity
-        rendered_identity = torch.where(
-            claim_strength > IDENTITY_ALPHA_EPSILON,
-            identity_labels[:, query_index],
-            rendered_identity,
-        )
-        remaining_identity = remaining_identity * (1.0 - identity_alpha[:, query_index])
-
-    rendered_occupancy = (1.0 - transmittance).clamp(0.0, 1.0)
-    visible_mask = rendered_occupancy > 0.05
-    rendered_identity = rendered_identity * visible_mask
-    rendered_depth = rendered_depth * visible_mask
-    rendered_depth = rendered_depth.unsqueeze(1) * depth_scale.mean(
-        dim=1, keepdim=True
-    ).unsqueeze(-1)
-    return rendered_identity, rendered_depth, rendered_occupancy.unsqueeze(1)
 
 
 def create_query_model():

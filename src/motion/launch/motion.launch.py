@@ -21,6 +21,8 @@ def generate_launch_description() -> LaunchDescription:
     )
     arm_state_topic = LaunchConfiguration("arm_state_topic")
     coordinator_state_topic = LaunchConfiguration("coordinator_state_topic")
+    reset_topic = LaunchConfiguration("reset_topic")
+    selected_candidate_topic = LaunchConfiguration("selected_candidate_topic")
     publish_cumotion_spheres = LaunchConfiguration("publish_cumotion_spheres")
     right_cumotion_robot_xrdf = LaunchConfiguration("right_cumotion_robot_xrdf")
     right_cumotion_urdf_path = LaunchConfiguration("right_cumotion_urdf_path")
@@ -89,6 +91,16 @@ def generate_launch_description() -> LaunchDescription:
                 description="Topic used by the coordinator to publish arbitration state.",
             ),
             DeclareLaunchArgument(
+                "selected_candidate_topic",
+                default_value="/vision/selected_candidate",
+                description="Atomic vision candidate topic consumed by the coordinator.",
+            ),
+            DeclareLaunchArgument(
+                "reset_topic",
+                default_value="/motion/reset",
+                description="Episode-reset topic used to clear coordinator and planner state.",
+            ),
+            DeclareLaunchArgument(
                 "publish_cumotion_spheres",
                 default_value="true",
                 description="Publish cuMotion robot collision spheres for RViz debugging.",
@@ -132,6 +144,8 @@ def generate_launch_description() -> LaunchDescription:
                     {
                         "arm_state_topic": arm_state_topic,
                         "coordinator_state_topic": coordinator_state_topic,
+                        "selected_candidate_topic": selected_candidate_topic,
+                        "reset_topic": reset_topic,
                     }
                 ],
             ),
@@ -156,6 +170,7 @@ def generate_launch_description() -> LaunchDescription:
                         "direct_trajectory_goal_time_tolerance": direct_trajectory_goal_time_tolerance,
                         "arm_state_topic": arm_state_topic,
                         "coordinator_state_topic": coordinator_state_topic,
+                        "reset_topic": reset_topic,
                         "robot_xrdf": collision_robot_xrdf,
                         "robot_urdf": collision_robot_urdf_path,
                     }
@@ -182,6 +197,7 @@ def generate_launch_description() -> LaunchDescription:
                         "direct_trajectory_goal_time_tolerance": direct_trajectory_goal_time_tolerance,
                         "arm_state_topic": arm_state_topic,
                         "coordinator_state_topic": coordinator_state_topic,
+                        "reset_topic": reset_topic,
                         "robot_xrdf": collision_robot_xrdf,
                         "robot_urdf": collision_robot_urdf_path,
                     }

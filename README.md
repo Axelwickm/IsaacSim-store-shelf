@@ -26,19 +26,19 @@ I built it to learn the modern Isaac Sim and ROS 2 manipulation stack, push cuMo
   - `image_collection.py` defines the `collect_vision_data`, `static`, and `store_demo` scenarios.
   - Uses **Omniverse Replicator** to capture RGB, instance segmentation, distance-to-camera, and per-frame metadata for vision training.
   - `trajectory_executor.py` implements direct **FollowJointTrajectory** action servers that apply planned joint trajectories to Isaac Sim articulations.
-  - `vision_panel.py` and `target_marker_visualizer.py` add in-simulation debug views for model output and selected pick targets.
+  - `vision_panel.py` adds an in-simulation debug view for the model output.
 
 - `src/vision`
   - Uses **PyTorch**, **torchvision**, **OpenCV**, and **ROS 2 image topics** for training and inference.
   - Input is camera RGB from `/camera/image_raw` plus `/camera/camera_info`; training data comes from Replicator RGB, instance segmentation, distance-to-camera, and metadata files.
-  - Output includes `/vision/debug_image`, `/vision/predicted_identity`, `/vision/predicted_depth`, `/vision/predicted_depth_viz`, `/vision/predicted_occupancy`, `/vision/selected_item_point`, and `/vision/selected_item_moveit_point`.
+  - Output includes `/vision/debug_image`, `/vision/selected_candidate`, `/vision/suggested_item_markers`, and `/vision/ground_truth_items`.
   - The model is a custom **query-based depth and identity predictor**.
   - The backbone is **MobileNetV3 Small** feature extraction followed by a 1x1 projection, learned object queries, a **Transformer decoder**, slot heads, and small alpha-mask patch decoders.
   - Inference chooses a visible item query, estimates a 3D camera-space point from predicted depth and camera intrinsics, then transforms it into world and MoveIt frames with **tf2**.
 
 - `src/motion`
   - Uses **ROS 2**, **MoveIt 2**, **NVIDIA Isaac ROS cuMotion**, and action-based trajectory execution.
-  - `coordinator.py` receives selected item points, assigns targets to the left or right arm, and sequences pick steps: pregrasp, grasp, close gripper, retract, move to drop, open gripper.
+  - `coordinator.py` receives selected candidate payloads, assigns targets to the left or right arm, and sequences pick steps: pregrasp, grasp, close gripper, retract, move to drop, open gripper.
   - `planner.py` converts assigned targets into MoveIt pose goals, sends requests to MoveGroup, publishes planned trajectories for peer-arm collision awareness, and can execute through direct Isaac Sim trajectory actions.
   - `occupancy.py` builds collision context from the other arm and planned peer trajectories.
   - `cumotion_sphere_publisher.py` publishes cuMotion robot spheres for RViz debugging against the visible robot mesh.
@@ -111,6 +111,16 @@ Run the same demo with RViz MoveIt/cuMotion debugging:
 ros2 launch controller store_demo.launch.py \
   motion_pipeline_id:=isaac_ros_cumotion \
   motion_planner_id:=cuMotion \
+  use_moveit_rviz:=true
+```
+
+Run the store demo with online vision training and RViz enabled:
+
+```bash
+ros2 launch controller store_demo.launch.py \
+  motion_pipeline_id:=isaac_ros_cumotion \
+  motion_planner_id:=cuMotion \
+  vision_online_training_enabled:=true \
   use_moveit_rviz:=true
 ```
 

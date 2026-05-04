@@ -33,11 +33,11 @@ DEFAULT_CHECKPOINT_DIR = Path("/workspace/checkpoints/vision")
 DEFAULT_BATCH_SIZE = 8
 DEFAULT_SPLIT = "train"
 DEFAULT_MODE = "train"
-DEFAULT_LEARNING_RATE = 1e-5
+DEFAULT_LEARNING_RATE = 1e-4
 DEFAULT_LOG_EVERY = 10
 DEFAULT_MAX_EPOCHS = 1000
 DEFAULT_SAVE_EVERY_EPOCHS = 1
-DISPLAY_SCALE = 0.5
+DISPLAY_SCALE = 0.3
 DEFAULT_USE_MIXED_PRECISION = True
 DISPLAY_INTERVAL_SECONDS = 5.0
 DEPTH_DISPLAY_MAX_METERS = 2.0
@@ -385,6 +385,7 @@ def main() -> None:
         "latent_dim": LATENT_DIM,
         "patch_size": PATCH_SIZE,
         "hidden_dim": HIDDEN_DIM,
+        "value_in_slot_head": True,
     }
     start_epoch = 0
     global_step = 0
@@ -402,6 +403,7 @@ def main() -> None:
             scaler=scaler if mode == "train" else None,
             expected_config=checkpoint_config,
             map_location=device,
+            strict=False,
         )
         if mode == "train":
             start_epoch = checkpoint_metadata["epoch"] + 1

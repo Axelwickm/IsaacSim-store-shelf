@@ -3,11 +3,11 @@
 from typing import Any
 
 import rclpy
-from geometry_msgs.msg import PointStamped
 from rclpy.node import Node
 from std_msgs.msg import String
 
 from .coordination import decode_payload, encode_payload
+
 PICK_STEP_SEQUENCE = (
     "approach_pregrasp",
     "move_to_grasp",
@@ -23,49 +23,40 @@ class MotionCoordinatorNode(Node):
         super().__init__("motion_coordinator")
         self.declare_parameter("arm_state_topic", "/motion/arm_state")
         self.declare_parameter("coordinator_state_topic", "/motion/coordinator_state")
-        self.declare_parameter("selected_item_point_topic", "/vision/selected_item_point")
-        self.declare_parameter(
-            "selected_item_moveit_point_topic",
-            "/vision/selected_item_moveit_point",
-        )
-        self.declare_parameter("latched_target_point_topic", "/motion/latched_target_point")
+        self.declare_parameter("selected_candidate_topic", "/vision/selected_candidate")
+        self.declare_parameter("reset_topic", "/motion/reset")
 
         self._arm_state_topic = str(self.get_parameter("arm_state_topic").value)
         self._coordinator_state_topic = str(
             self.get_parameter("coordinator_state_topic").value
         )
-        self._selected_item_point_topic = str(
-            self.get_parameter("selected_item_point_topic").value
+        self._selected_candidate_topic = str(
+            self.get_parameter("selected_candidate_topic").value
         )
-        self._selected_item_moveit_point_topic = str(
-            self.get_parameter("selected_item_moveit_point_topic").value
-        )
-        self._latched_target_point_topic = str(
-            self.get_parameter("latched_target_point_topic").value
-        )
+        self._reset_topic = str(self.get_parameter("reset_topic").value)
         self._arm_states: dict[str, dict[str, Any]] = {}
         self._last_assignment_arm: str | None = None
         self._assigned_target: dict[str, Any] | None = None
         self._active_step: dict[str, Any] | None = None
         self._active_step_index = 0
         self._step_command_serial = 0
-        self._candidate_points: dict[int, dict[str, dict[str, Any]]] = {}
+        self._candidate_points: dict[int, dict[str, Any]] = {}
+        self._selected_candidate_subscription = self.create_subscription(
+            String,
+            self._selected_candidate_topic,
+            self._handle_selected_candidate,
+            10,
+        )
         self._arm_state_subscription = self.create_subscription(
             String,
             self._arm_state_topic,
             self._handle_arm_state,
             10,
         )
-        self._selected_item_point_subscription = self.create_subscription(
-            PointStamped,
-            self._selected_item_point_topic,
-            self._handle_selected_item_point,
-            10,
-        )
-        self._selected_item_moveit_point_subscription = self.create_subscription(
-            PointStamped,
-            self._selected_item_moveit_point_topic,
-            self._handle_selected_item_moveit_point,
+        self._reset_subscription = self.create_subscription(
+            String,
+            self._reset_topic,
+            self._handle_reset,
             10,
         )
         self._coordinator_state_publisher = self.create_publisher(
@@ -73,17 +64,12 @@ class MotionCoordinatorNode(Node):
             self._coordinator_state_topic,
             10,
         )
-        self._latched_target_point_publisher = self.create_publisher(
-            PointStamped,
-            self._latched_target_point_topic,
-            10,
-        )
 
         self.get_logger().info(
             f"Motion coordinator ready (arm_state_topic={self._arm_state_topic}, "
             f"coordinator_state_topic={self._coordinator_state_topic}, "
-            f"selected_item_point_topic={self._selected_item_point_topic}, "
-            f"selected_item_moveit_point_topic={self._selected_item_moveit_point_topic})"
+            f"selected_candidate_topic={self._selected_candidate_topic}, "
+            f"reset_topic={self._reset_topic})"
         )
 
     def _handle_arm_state(self, message: String) -> None:
@@ -103,44 +89,95 @@ class MotionCoordinatorNode(Node):
         self._maybe_issue_next_step()
         self._publish_state()
 
-    def _handle_selected_item_point(self, message: PointStamped) -> None:
-        self._record_candidate_point("world", message)
-
-    def _handle_selected_item_moveit_point(self, message: PointStamped) -> None:
-        self._record_candidate_point("moveit", message)
-
-    def _record_candidate_point(self, point_type: str, message: PointStamped) -> None:
-        stamp_ns = self._message_stamp_ns(message)
-        candidate = self._candidate_points.setdefault(stamp_ns, {})
-        candidate[point_type] = self._serialize_point(message)
+    def _handle_selected_candidate(self, message: String) -> None:
+        payload = decode_payload(message)
+        if payload is None:
+            return
+        stamp_ns = int(payload.get("stamp_ns") or 0)
+        world_point = payload.get("world_point")
+        moveit_point = payload.get("moveit_point")
+        arm_side = str(payload.get("arm_side", "")).strip().lower()
+        if (
+            stamp_ns <= 0
+            or not isinstance(world_point, dict)
+            or not isinstance(moveit_point, dict)
+            or arm_side not in {"left", "right"}
+        ):
+            return
+        candidate = {
+            "candidate_id": str(payload.get("candidate_id", "")).strip(),
+            "stamp_ns": stamp_ns,
+            "arm_side": arm_side,
+            "query_index": int(payload.get("query_index") or -1),
+            "selection_mode": str(payload.get("selection_mode", "")).strip(),
+            "selected_value": float(payload.get("selected_value") or 0.0),
+            "value_left": float(payload.get("value_left") or 0.0),
+            "value_right": float(payload.get("value_right") or 0.0),
+            "world_point": world_point,
+            "moveit_point": moveit_point,
+        }
+        self._candidate_points[stamp_ns] = candidate
         self._maybe_assign_candidate()
         self._maybe_issue_next_step()
+        self._publish_state()
+
+    def _handle_reset(self, message: String) -> None:
+        payload = decode_payload(message)
+        reset_reason = ""
+        if isinstance(payload, dict):
+            reset_reason = str(payload.get("reason", "")).strip()
+        self._arm_states = {}
+        self._assigned_target = None
+        self._active_step = None
+        self._active_step_index = 0
+        self._candidate_points.clear()
+        self.get_logger().info(
+            "Received motion reset"
+            + (f" reason={reset_reason}" if reset_reason else "")
+        )
         self._publish_state()
 
     def _maybe_assign_candidate(self) -> None:
         if self._assigned_target is not None:
             return
-        assigned_arm = self._select_assignment_arm()
-        if assigned_arm is None:
-            return
         for stamp_ns in sorted(self._candidate_points):
             candidate = self._candidate_points[stamp_ns]
-            world_point = candidate.get("world")
-            moveit_point = candidate.get("moveit")
+            world_point = candidate.get("world_point")
+            moveit_point = candidate.get("moveit_point")
             if not isinstance(world_point, dict) or not isinstance(moveit_point, dict):
                 continue
+            requested_arm = str(candidate.get("arm_side", "")).strip().lower()
+            if requested_arm:
+                if not self._arm_available_for_assignment(requested_arm):
+                    continue
+                assigned_arm = requested_arm
+            else:
+                assigned_arm = self._select_assignment_arm()
+                if assigned_arm is None:
+                    return
             if self._point_reserved_by_any_arm(moveit_point):
                 continue
             self._assigned_target = {
                 "arm_side": assigned_arm,
                 "stamp_ns": stamp_ns,
+                "candidate_id": str(candidate.get("candidate_id", "")).strip(),
+                "query_index": int(candidate.get("query_index") or -1),
+                "selection_mode": str(candidate.get("selection_mode", "")).strip(),
+                "selected_value": float(candidate.get("selected_value") or 0.0),
+                "value_left": float(candidate.get("value_left") or 0.0),
+                "value_right": float(candidate.get("value_right") or 0.0),
                 "world_point": world_point,
                 "moveit_point": moveit_point,
             }
             self._active_step = None
             self._active_step_index = 0
             self._last_assignment_arm = assigned_arm
-            self._publish_latched_target(world_point)
+            self.get_logger().info(
+                "Assigned candidate "
+                f"{self._assigned_target['candidate_id'] or stamp_ns} "
+                f"to arm={assigned_arm} "
+                f"moveit={self._point_xyz_text(moveit_point)}"
+            )
             self._candidate_points.pop(stamp_ns, None)
             return
 
@@ -169,6 +206,12 @@ class MotionCoordinatorNode(Node):
             abs(float(first_xyz[index]) - float(second_xyz[index])) <= 1e-4
             for index in range(3)
         )
+
+    def _point_xyz_text(self, point: dict[str, Any]) -> str:
+        xyz = point.get("xyz") or []
+        if len(xyz) != 3:
+            return "unknown"
+        return f"({float(xyz[0]):.3f}, {float(xyz[1]):.3f}, {float(xyz[2]):.3f})"
 
     def _maybe_issue_next_step(self) -> None:
         if self._assigned_target is None or self._active_step is not None:
@@ -258,43 +301,6 @@ class MotionCoordinatorNode(Node):
             self._active_step_index = 0
             self._assigned_target = None
 
-    def _publish_latched_target(self, point: dict[str, Any]) -> None:
-        message = self._deserialize_point(point)
-        if message is not None:
-            self._latched_target_point_publisher.publish(message)
-
-    def _serialize_point(self, message: PointStamped) -> dict[str, Any]:
-        return {
-            "frame_id": message.header.frame_id,
-            "stamp_ns": self._message_stamp_ns(message),
-            "xyz": [
-                float(message.point.x),
-                float(message.point.y),
-                float(message.point.z),
-            ],
-        }
-
-    def _deserialize_point(self, payload: dict[str, Any]) -> PointStamped | None:
-        xyz = payload.get("xyz") or []
-        if len(xyz) != 3:
-            return None
-        message = PointStamped()
-        message.header.frame_id = str(payload.get("frame_id", ""))
-        stamp_ns = int(payload.get("stamp_ns") or 0)
-        if stamp_ns > 0:
-            message.header.stamp.sec = stamp_ns // 1_000_000_000
-            message.header.stamp.nanosec = stamp_ns % 1_000_000_000
-        message.point.x = float(xyz[0])
-        message.point.y = float(xyz[1])
-        message.point.z = float(xyz[2])
-        return message
-
-    def _message_stamp_ns(self, message: PointStamped) -> int:
-        return (
-            int(message.header.stamp.sec) * 1_000_000_000
-            + int(message.header.stamp.nanosec)
-        )
-
     def _publish_state(self) -> None:
         payload = {
             "active_step": self._active_step,
@@ -310,9 +316,12 @@ def main() -> None:
     node = MotionCoordinatorNode()
     try:
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
         node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":
