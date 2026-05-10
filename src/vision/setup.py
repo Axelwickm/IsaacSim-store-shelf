@@ -29,7 +29,6 @@ setup(
     license="Apache-2.0",
     entry_points={
         "console_scripts": [
-            "train_vision = vision.train_vision:main",
             "vision_inference = vision.inference:main",
             "vision_online_trainer = vision.online_trainer:main",
             "view_dataset = vision.view_dataset:main",

@@ -64,6 +64,11 @@ def generate_launch_description() -> LaunchDescription:
                 description="Directory used as the durable replay-sample queue.",
             ),
             DeclareLaunchArgument(
+                "dataset_dir",
+                default_value="/workspace/collect_vision_data_output",
+                description="Replicator dataset directory scanned by online billboard training.",
+            ),
+            DeclareLaunchArgument(
                 "checkpoint_reload_period_sec",
                 default_value="5.0",
                 description="Seconds between inference checkpoint hot-reload checks.",
@@ -90,7 +95,7 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "replay_buffer_capacity",
-                default_value="2048",
+                default_value="8000",
                 description="Maximum number of replay samples kept in memory.",
             ),
             DeclareLaunchArgument(
@@ -115,23 +120,38 @@ def generate_launch_description() -> LaunchDescription:
             ),
             DeclareLaunchArgument(
                 "online_learning_rate",
-                default_value="1e-3",
+                default_value="2e-4",
                 description="Learning rate for online replay-buffer training.",
             ),
             DeclareLaunchArgument(
                 "geometry_loss_weight",
                 default_value="1.0",
-                description="Weight for online GT-projected query-center supervision.",
+                description="Weight for online billboard instance-segmentation supervision.",
             ),
             DeclareLaunchArgument(
                 "presence_loss_weight",
                 default_value="0.2",
-                description="Weight for online GT query-presence supervision.",
+                description="Weight for online missed-occupancy supervision.",
             ),
             DeclareLaunchArgument(
                 "depth_loss_weight",
                 default_value="0.2",
-                description="Weight for online GT projected-depth supervision.",
+                description="Weight for online billboard depth supervision.",
+            ),
+            DeclareLaunchArgument(
+                "value_loss_weight",
+                default_value="1.0",
+                description="Weight for online arm-conditioned planner-success supervision.",
+            ),
+            DeclareLaunchArgument(
+                "sample_prefetch_size",
+                default_value="64",
+                description="Decoded Replicator sample cache target for online trainer.",
+            ),
+            DeclareLaunchArgument(
+                "sample_loader_workers",
+                default_value="2",
+                description="Background workers used by the online trainer to decode samples.",
             ),
             DeclareLaunchArgument(
                 "tensorboard_log_dir",
@@ -150,6 +170,11 @@ def generate_launch_description() -> LaunchDescription:
                 "use_mixed_precision",
                 default_value="true",
                 description="Whether to enable CUDA mixed precision.",
+            ),
+            DeclareLaunchArgument(
+                "cuda_memory_log_period_sec",
+                default_value="30.0",
+                description="Seconds between vision CUDA memory accounting logs.",
             ),
             Node(
                 package="vision",
@@ -190,6 +215,9 @@ def generate_launch_description() -> LaunchDescription:
                         "tensorboard_run_name": LaunchConfiguration("tensorboard_run_name"),
                         "image_size": LaunchConfiguration("image_size"),
                         "use_mixed_precision": LaunchConfiguration("use_mixed_precision"),
+                        "cuda_memory_log_period_sec": LaunchConfiguration(
+                            "cuda_memory_log_period_sec"
+                        ),
                     }
                 ],
             ),
@@ -203,6 +231,7 @@ def generate_launch_description() -> LaunchDescription:
                     {
                         "checkpoint_dir": LaunchConfiguration("checkpoint_dir"),
                         "checkpoint_path": LaunchConfiguration("checkpoint_path"),
+                        "dataset_dir": LaunchConfiguration("dataset_dir"),
                         "replay_dir": LaunchConfiguration("replay_dir"),
                         "image_size": LaunchConfiguration("image_size"),
                         "use_mixed_precision": LaunchConfiguration("use_mixed_precision"),
@@ -215,8 +244,14 @@ def generate_launch_description() -> LaunchDescription:
                         "geometry_loss_weight": LaunchConfiguration("geometry_loss_weight"),
                         "presence_loss_weight": LaunchConfiguration("presence_loss_weight"),
                         "depth_loss_weight": LaunchConfiguration("depth_loss_weight"),
+                        "value_loss_weight": LaunchConfiguration("value_loss_weight"),
+                        "sample_prefetch_size": LaunchConfiguration("sample_prefetch_size"),
+                        "sample_loader_workers": LaunchConfiguration("sample_loader_workers"),
                         "tensorboard_log_dir": LaunchConfiguration("tensorboard_log_dir"),
                         "tensorboard_run_name": LaunchConfiguration("tensorboard_run_name"),
+                        "cuda_memory_log_period_sec": LaunchConfiguration(
+                            "cuda_memory_log_period_sec"
+                        ),
                     }
                 ],
             ),

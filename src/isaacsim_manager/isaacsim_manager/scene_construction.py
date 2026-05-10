@@ -779,6 +779,20 @@ def build_item_position_pools(stage) -> list[list]:
     return pools
 
 
+def discover_item_prims(stage) -> list:
+    items_prim = find_prim_named(stage, ITEMS_PRIM_NAME)
+    if items_prim is None:
+        return []
+
+    item_prims = []
+    for child_prim in active_children(items_prim):
+        if child_prim.GetName().startswith("item_group_"):
+            item_prims.extend(active_children(child_prim))
+        else:
+            item_prims.append(child_prim)
+    return [prim for prim in item_prims if prim.IsValid() and prim.IsActive()]
+
+
 def randomize_item_position_pools(pools: list[list]) -> list[str]:
     shuffled_groups = []
     for pool in pools:
@@ -941,6 +955,8 @@ def set_semantic_label(prim, label: str) -> None:
 
 
 def apply_capture_semantics(stage, robot_prim_path: str) -> None:
+    from pxr import Usd
+
     robot_prim = stage.GetPrimAtPath(robot_prim_path)
     if robot_prim.IsValid():
         set_semantic_label(robot_prim, "background")
@@ -958,9 +974,20 @@ def apply_capture_semantics(stage, robot_prim_path: str) -> None:
         return
 
     for group_prim in active_children(items_prim):
-        group_label = group_prim.GetName()
-        for item_prim in active_children(group_prim):
-            set_semantic_label(item_prim, group_label)
+        group_label = (
+            group_prim.GetName()
+            if group_prim.GetName().startswith("item_group_")
+            else "item_group_misc"
+        )
+        item_roots = (
+            active_children(group_prim)
+            if group_prim.GetName().startswith("item_group_")
+            else [group_prim]
+        )
+        for item_prim in item_roots:
+            for prim in Usd.PrimRange(item_prim):
+                if prim.IsActive():
+                    set_semantic_label(prim, group_label)
 
 
 def construct_scene(configuration: str) -> dict:

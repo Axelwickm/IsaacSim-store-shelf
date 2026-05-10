@@ -2,6 +2,7 @@
 
 import json
 import math
+import os
 import random
 import time
 from collections import OrderedDict, deque
@@ -24,7 +25,15 @@ from visualization_msgs.msg import Marker, MarkerArray
 
 from vision.checkpoints import load_checkpoint
 from vision.dataset import DEFAULT_IMAGE_SIZE, RGB_MEAN, RGB_STD
-from vision.model import HIDDEN_DIM, LATENT_DIM, NUM_QUERIES, create_query_model, model_device
+from vision.model import (
+    HIDDEN_DIM,
+    LATENT_DIM,
+    NUM_QUERIES,
+    PATCH_SIZE,
+    create_query_model,
+    model_device,
+    render_billboards,
+)
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -44,18 +53,19 @@ DEFAULT_SELECTED_CANDIDATE_TOPIC = "/vision/selected_candidate"
 DEFAULT_SUGGESTED_ITEM_MARKERS_TOPIC = "/vision/suggested_item_markers"
 DEFAULT_GROUND_TRUTH_ITEMS_TOPIC = "/vision/ground_truth_items"
 DEFAULT_ARM_STATE_TOPIC = "/motion/arm_state"
+DEFAULT_RESET_TOPIC = "/motion/reset"
 DEFAULT_TARGET_FRAME_ID = "world"
 DEFAULT_MOVEIT_TARGET_FRAME_ID = "yumi_body"
 DEFAULT_CAMERA_FRAME_CONVENTION = "ros_optical"
 DEFAULT_QUERY_PRESENCE_THRESHOLD = 0.2
 DEFAULT_EXPLORATION_EPSILON = 0.10
 DEFAULT_LOG_EVERY = 30
-DEFAULT_REPLAY_BUFFER_CAPACITY = 2048
+DEFAULT_REPLAY_BUFFER_CAPACITY = 8000
 DEFAULT_MIN_REPLAY_SIZE = 2
 DEFAULT_TRAIN_BATCH_SIZE = 16
 DEFAULT_TRAIN_STEPS_PER_TICK = 4
 DEFAULT_TRAIN_TICK_PERIOD = 0.01
-DEFAULT_LEARNING_RATE = 1e-3
+DEFAULT_LEARNING_RATE = 2e-4
 DEFAULT_GEOMETRY_LOSS_WEIGHT = 1.0
 DEFAULT_PRESENCE_LOSS_WEIGHT = 0.2
 DEFAULT_DEPTH_LOSS_WEIGHT = 0.2
@@ -63,6 +73,7 @@ DEFAULT_CHECKPOINT_SAVE_INTERVAL = 100
 DEFAULT_PENDING_CANDIDATE_TIMEOUT = 30.0
 DEFAULT_MAX_INFLIGHT_CANDIDATES = 1
 DEFAULT_MAX_SUGGESTED_MARKERS = 32
+DEFAULT_CUDA_MEMORY_LOG_PERIOD = 30.0
 
 
 def _default_run_name() -> str:
@@ -91,6 +102,146 @@ def _parameter_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "on"}
     return bool(value)
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _value_to_rgb(value: float) -> tuple[float, float, float]:
+    value = _clamp01(value)
+    return 1.0 - value, value, 0.0
+
+
+def _arm_side_to_index(arm_side: str) -> int | None:
+    normalized = arm_side.strip().lower()
+    if normalized == "left":
+        return 0
+    if normalized == "right":
+        return 1
+    return None
+
+
+def _bytes_to_mib(byte_count: int | float) -> float:
+    return float(byte_count) / (1024.0 * 1024.0)
+
+
+def _to_display_depth(depth: torch.Tensor, occupancy: torch.Tensor | None = None) -> np.ndarray:
+    depth_np = depth.detach().float().cpu().numpy()
+    if depth_np.ndim == 3:
+        depth_np = depth_np[0]
+    mask_np = None
+    if occupancy is not None:
+        mask_np = occupancy.detach().float().cpu().numpy()
+        if mask_np.ndim == 3:
+            mask_np = mask_np[0]
+        mask_np = mask_np > 0.05
+    valid = depth_np > 1e-6
+    if mask_np is not None:
+        valid = np.logical_and(valid, mask_np)
+    if not np.any(valid):
+        return np.zeros((*depth_np.shape, 3), dtype=np.uint8)
+    valid_values = depth_np[valid]
+    min_depth = float(np.percentile(valid_values, 5.0))
+    max_depth = float(np.percentile(valid_values, 95.0))
+    if max_depth <= min_depth:
+        max_depth = min_depth + 1e-3
+    normalized = np.clip((depth_np - min_depth) / (max_depth - min_depth), 0.0, 1.0)
+    depth_u8 = (normalized * 255.0).astype(np.uint8)
+    display = np.repeat(depth_u8[..., None], 3, axis=2)
+    if mask_np is not None:
+        display[~mask_np] = 0
+    return display
+
+
+def _to_display_occupancy(occupancy: torch.Tensor) -> np.ndarray:
+    occupancy_np = occupancy.detach().float().cpu().numpy()
+    if occupancy_np.ndim == 3:
+        occupancy_np = occupancy_np[0]
+    occupancy_np = np.clip(occupancy_np, 0.0, 1.0)
+    return np.repeat((occupancy_np[..., None] * 255.0).astype(np.uint8), 3, axis=2)
+
+
+def _to_display_identity(identity: torch.Tensor, occupancy: torch.Tensor | None = None) -> np.ndarray:
+    identity_np = identity.detach().float().cpu().numpy()
+    if identity_np.ndim == 3:
+        identity_np = identity_np[0]
+    hue = np.mod(identity_np * 137.508, 360.0) / 2.0
+    saturation = np.full_like(hue, 180.0)
+    value = np.full_like(hue, 255.0)
+    hsv = np.stack([hue, saturation, value], axis=-1).astype(np.uint8)
+    display = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)
+    display[identity_np <= 0.0] = 0
+    if occupancy is not None:
+        occupancy_np = occupancy.detach().float().cpu().numpy()
+        if occupancy_np.ndim == 3:
+            occupancy_np = occupancy_np[0]
+        display[occupancy_np <= 0.05] = 0
+    return display
+
+
+def _to_display_billboard_values(
+    identity: torch.Tensor,
+    occupancy: torch.Tensor,
+    value_probs: torch.Tensor,
+) -> np.ndarray:
+    identity_np = identity.detach().float().cpu().numpy()
+    if identity_np.ndim == 3:
+        identity_np = identity_np[0]
+    occupancy_np = occupancy.detach().float().cpu().numpy()
+    if occupancy_np.ndim == 3:
+        occupancy_np = occupancy_np[0]
+    values_np = value_probs.detach().float().cpu().numpy()
+    values_np = np.clip(values_np, 0.0, 1.0)
+
+    display = np.zeros((*identity_np.shape, 3), dtype=np.uint8)
+    for query_index, query_values in enumerate(values_np.tolist()):
+        mask = (np.rint(identity_np).astype(np.int32) == query_index + 1) & (
+            occupancy_np > 0.05
+        )
+        if not np.any(mask):
+            continue
+        if isinstance(query_values, list) and len(query_values) >= 2:
+            green = _clamp01(float(query_values[0]))
+            red = _clamp01(float(query_values[1]))
+            blue = 0.0
+        else:
+            red, green, blue = _value_to_rgb(float(query_values))
+        display[mask] = (
+            int(round(red * 255.0)),
+            int(round(green * 255.0)),
+            int(round(blue * 255.0)),
+        )
+    return display
+
+
+def _compose_debug_panel(
+    rgb: np.ndarray,
+    identity: torch.Tensor,
+    depth: torch.Tensor,
+    occupancy: torch.Tensor,
+    value_probs: torch.Tensor,
+    selected_mask: np.ndarray | None,
+) -> np.ndarray:
+    identity_display = _to_display_identity(identity, occupancy)
+    value_display = _to_display_billboard_values(identity, occupancy, value_probs)
+    occupancy_display = _to_display_occupancy(occupancy)
+    rgb_display = np.ascontiguousarray(rgb.copy())
+    if selected_mask is not None:
+        mask = cv2.resize(
+            selected_mask.astype(np.float32),
+            (rgb_display.shape[1], rgb_display.shape[0]),
+            interpolation=cv2.INTER_LINEAR,
+        )
+        tint = np.zeros_like(rgb_display)
+        tint[:, :, 1] = 255
+        alpha = np.clip(mask[..., None] * 0.55, 0.0, 0.55)
+        rgb_display = (rgb_display.astype(np.float32) * (1.0 - alpha) + tint * alpha).astype(
+            np.uint8
+        )
+    top = np.concatenate([rgb_display, identity_display], axis=1)
+    bottom = np.concatenate([value_display, occupancy_display], axis=1)
+    return np.concatenate([top, bottom], axis=0)
 
 
 def _image_message_to_rgb_array(message: Image) -> np.ndarray:
@@ -156,6 +307,7 @@ class VisionInferenceNode(Node):
         self.declare_parameter("pending_candidate_timeout_sec", DEFAULT_PENDING_CANDIDATE_TIMEOUT)
         self.declare_parameter("max_inflight_candidates", DEFAULT_MAX_INFLIGHT_CANDIDATES)
         self.declare_parameter("max_suggested_markers", DEFAULT_MAX_SUGGESTED_MARKERS)
+        self.declare_parameter("cuda_memory_log_period_sec", DEFAULT_CUDA_MEMORY_LOG_PERIOD)
 
         checkpoint_dir = Path(str(self.get_parameter("checkpoint_dir").value)).resolve()
         checkpoint_path_value = str(self.get_parameter("checkpoint_path").value).strip()
@@ -234,6 +386,10 @@ class VisionInferenceNode(Node):
             int(self.get_parameter("max_suggested_markers").value),
             1,
         )
+        self._cuda_memory_log_period_sec = max(
+            float(self.get_parameter("cuda_memory_log_period_sec").value),
+            0.0,
+        )
         self._camera_info: CameraInfo | None = None
 
         latest_checkpoint_path = checkpoint_dir / "latest.pt"
@@ -249,9 +405,11 @@ class VisionInferenceNode(Node):
         self._model = create_query_model().to(self._device)
         self._checkpoint_config = {
             "num_queries": NUM_QUERIES,
+            "patch_size": PATCH_SIZE,
             "latent_dim": LATENT_DIM,
             "hidden_dim": HIDDEN_DIM,
             "value_in_slot_head": True,
+            "billboard_rendering": "center_sampled_slots_size2p5_v6",
         }
 
         self._optimizer: torch.optim.Optimizer | None = None
@@ -264,14 +422,21 @@ class VisionInferenceNode(Node):
             "missing_keys": [],
             "unexpected_keys": [],
         }
+        checkpoint_loaded = False
         if checkpoint_path.exists():
-            checkpoint_metadata = load_checkpoint(
-                checkpoint_path,
-                self._model,
-                expected_config=self._checkpoint_config,
-                map_location=self._device,
-                strict=False,
-            )
+            try:
+                checkpoint_metadata = load_checkpoint(
+                    checkpoint_path,
+                    self._model,
+                    expected_config=self._checkpoint_config,
+                    map_location=self._device,
+                    strict=False,
+                )
+                checkpoint_loaded = True
+            except Exception as error:
+                self.get_logger().warning(
+                    f"Skipping incompatible vision checkpoint {checkpoint_path}: {error}"
+                )
         self._model.eval()
         self._train_step = int(checkpoint_metadata["global_step"])
         self._writer = None
@@ -328,8 +493,14 @@ class VisionInferenceNode(Node):
         self._selection_serial = 0
         self._replay_buffer: deque[dict[str, Any]] = deque(maxlen=self._replay_buffer_capacity)
         self._pending_candidates: OrderedDict[str, dict[str, Any]] = OrderedDict()
-        self._seen_plan_outcomes: set[str] = set()
+        self._seen_plan_outcomes: set[tuple[str, str, str]] = set()
         self._ground_truth_items: list[dict[str, Any]] = []
+        self._reset_subscription = self.create_subscription(
+            String,
+            DEFAULT_RESET_TOPIC,
+            self._handle_reset,
+            10,
+        )
         self._outcome_count = 0
         self._last_training_mode_log_monotonic = 0.0
         self._last_replay_wait_log_size = 0
@@ -337,8 +508,14 @@ class VisionInferenceNode(Node):
             self._checkpoint_reload_period_sec,
             self._maybe_reload_checkpoint,
         )
+        self._cuda_memory_timer = None
+        if self._device.type == "cuda" and self._cuda_memory_log_period_sec > 0.0:
+            self._cuda_memory_timer = self.create_timer(
+                self._cuda_memory_log_period_sec,
+                self._log_cuda_memory,
+            )
 
-        if checkpoint_path.exists():
+        if checkpoint_loaded:
             self.get_logger().info(
                 f"Loaded checkpoint from {checkpoint_path} at "
                 f"epoch={checkpoint_metadata['epoch']} global_step={checkpoint_metadata['global_step']}"
@@ -373,33 +550,46 @@ class VisionInferenceNode(Node):
                     "Checkpoint unexpected keys on load: "
                     + ", ".join(sorted(unexpected_keys))
                 )
-        else:
+        elif not checkpoint_path.exists():
             self.get_logger().warning(
                 f"Checkpoint not found at {checkpoint_path}. Starting vision inference from random weights."
             )
         self.get_logger().info(
             "Vision inference ready "
-            f"(image_topic={image_topic}, image_size={self._image_size}, device={self._device})"
+            f"(pid={os.getpid()}, image_topic={image_topic}, image_size={self._image_size}, "
+            f"device={self._device})"
         )
         self.get_logger().info(
             "Vision mode: "
-            f"{'replay-recording' if self._online_training_enabled else 'inference-only'}; "
+            f"{'online-billboard-training' if self._online_training_enabled else 'billboard-inference-only'}; "
             f"candidate topic={selected_candidate_topic}; "
             f"suggested markers topic={suggested_item_markers_topic}; "
-            f"arm state topic={arm_state_topic}"
+            f"arm state topic={arm_state_topic}; "
+            f"reset topic={DEFAULT_RESET_TOPIC}"
         )
         self.get_logger().info(
             "Vision mode details: "
             f"exploration_epsilon="
             f"{self._exploration_epsilon if self._online_training_enabled else 0.0:.3f}; "
-            f"replay_buffer_capacity={self._replay_buffer_capacity}; "
-            f"min_replay_size={self._min_replay_size}; "
             f"train_batch_size={self._train_batch_size}; "
             f"geometry_loss_weight={self._geometry_loss_weight:.3f}; "
             f"presence_loss_weight={self._presence_loss_weight:.3f}; "
             f"depth_loss_weight={self._depth_loss_weight:.3f}; "
-            f"replay_dir={self._replay_dir}; "
+            f"checkpoint_reload_period_sec={self._checkpoint_reload_period_sec:.1f}; "
             f"camera_frame_convention={self._camera_frame_convention}"
+        )
+        self._log_cuda_memory()
+
+    def _log_cuda_memory(self) -> None:
+        if self._device.type != "cuda":
+            return
+        device = self._device
+        self.get_logger().info(
+            "Vision inference CUDA memory: "
+            f"pid={os.getpid()}; "
+            f"allocated={_bytes_to_mib(torch.cuda.memory_allocated(device)):.1f}MiB; "
+            f"reserved={_bytes_to_mib(torch.cuda.memory_reserved(device)):.1f}MiB; "
+            f"max_allocated={_bytes_to_mib(torch.cuda.max_memory_allocated(device)):.1f}MiB"
         )
 
     def _maybe_reload_checkpoint(self) -> None:
@@ -559,65 +749,6 @@ class VisionInferenceNode(Node):
             forward_m,
         )
 
-    def _world_point_from_model_prediction(
-        self,
-        center: torch.Tensor,
-        depth: torch.Tensor,
-        image_header,
-        *,
-        source_width: int,
-        source_height: int,
-    ) -> PointStamped | None:
-        if self._camera_info is None:
-            return None
-        model_u = float((center[0].item() + 1.0) * 0.5 * (self._image_size - 1))
-        model_v = float((center[1].item() + 1.0) * 0.5 * (self._image_size - 1))
-        forward_m = float(depth[0].item())
-        if forward_m <= 0.0:
-            return None
-
-        scale_x = float(source_width) / float(self._image_size)
-        scale_y = float(source_height) / float(self._image_size)
-        u = model_u * scale_x
-        v = model_v * scale_y
-
-        fx = float(self._camera_info.k[0])
-        fy = float(self._camera_info.k[4])
-        cx = float(self._camera_info.k[2])
-        cy = float(self._camera_info.k[5])
-        if fx == 0.0 or fy == 0.0:
-            return None
-
-        x_normalized = (u - cx) / fx
-        y_normalized = (v - cy) / fy
-        camera_x, camera_y, camera_z, _forward_m = self._camera_point_from_pixel(
-            x_normalized,
-            y_normalized,
-            forward_m,
-        )
-
-        camera_pose = PoseStamped()
-        camera_pose.header.stamp = rclpy.time.Time().to_msg()
-        camera_pose.header.frame_id = self._camera_info.header.frame_id or image_header.frame_id
-        camera_pose.pose.position.x = camera_x
-        camera_pose.pose.position.y = camera_y
-        camera_pose.pose.position.z = camera_z
-        camera_pose.pose.orientation.w = 1.0
-
-        try:
-            world_pose = self._tf_buffer.transform(
-                camera_pose,
-                self._target_frame_id,
-                timeout=Duration(seconds=0.05),
-            )
-        except Exception:
-            return None
-
-        world_point = PointStamped()
-        world_point.header = world_pose.header
-        world_point.point = world_pose.pose.position
-        return world_point
-
     def _normalized_pixel_from_camera_point(
         self,
         point: PointStamped,
@@ -745,240 +876,63 @@ class VisionInferenceNode(Node):
     def _should_log_projection_debug(self) -> bool:
         return self._online_training_enabled or self._should_log_selection_debug()
 
-    def _build_debug_overlay(
-        self,
-        rgb: np.ndarray,
-        centers: torch.Tensor,
-        sizes: torch.Tensor,
-        depth: torch.Tensor,
-        presence_probs: torch.Tensor,
-        value_probs: torch.Tensor,
-        selected_query_index: int | None,
-        selected_arm_side: str | None,
-        ground_truth_items: list[dict[str, Any]],
-    ) -> np.ndarray:
-        overlay = np.ascontiguousarray(rgb.copy())
-        image_height, image_width = overlay.shape[:2]
-        for query_index in range(centers.shape[0]):
-            center_x = float(centers[query_index, 0].item())
-            center_y = float(centers[query_index, 1].item())
-            pixel_x = int(round((center_x + 1.0) * 0.5 * (image_width - 1)))
-            pixel_y = int(round((center_y + 1.0) * 0.5 * (image_height - 1)))
-            radius = int(
-                max(
-                    3.0,
-                    0.5
-                    * max(image_width, image_height)
-                    * max(
-                        float(sizes[query_index, 0].item()),
-                        float(sizes[query_index, 1].item()),
-                    ),
-                )
-            )
-            presence = float(presence_probs[query_index].item())
-            left_value = float(value_probs[query_index, 0].item())
-            right_value = float(value_probs[query_index, 1].item())
-            predicted_depth = float(depth[query_index].item())
-            if presence < self._query_presence_threshold:
-                color = (100, 100, 100)
-            else:
-                color = (40, 140, 255)
-            thickness = 3 if query_index == selected_query_index else 1
-            draw_target = overlay
-            if presence < 0.50:
-                draw_target = overlay.copy()
-            cv2.circle(draw_target, (pixel_x, pixel_y), radius, color, thickness, cv2.LINE_AA)
-            cv2.circle(draw_target, (pixel_x, pixel_y), 2, color, -1, cv2.LINE_AA)
-            label = (
-                f"q{query_index} L:{left_value:.2f} R:{right_value:.2f} "
-                f"P:{presence:.2f} Z:{predicted_depth:.2f}"
-            )
-            cv2.putText(
-                draw_target,
-                label,
-                (pixel_x + 6, max(18, pixel_y - 6)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.35,
-                color,
-                1,
-                cv2.LINE_AA,
-            )
-            if presence < 0.50:
-                overlay = cv2.addWeighted(draw_target, 0.80, overlay, 0.20, 0.0)
-        for item in ground_truth_items:
-            point_payload = item.get("point")
-            if not isinstance(point_payload, dict):
-                continue
-            model_uv = self._project_world_point_to_model_uv(point_payload)
-            if model_uv is None:
-                continue
-            pixel_x = int(
-                round(float(model_uv[0]) / max(self._image_size - 1, 1) * (image_width - 1))
-            )
-            pixel_y = int(
-                round(float(model_uv[1]) / max(self._image_size - 1, 1) * (image_height - 1))
-            )
-            if pixel_x < 0 or pixel_x >= image_width or pixel_y < 0 or pixel_y >= image_height:
-                continue
-            color = (40, 240, 80)
-            cv2.drawMarker(
-                overlay,
-                (pixel_x, pixel_y),
-                color,
-                markerType=cv2.MARKER_CROSS,
-                markerSize=16,
-                thickness=2,
-                line_type=cv2.LINE_AA,
-            )
-            cv2.circle(overlay, (pixel_x, pixel_y), 7, color, 2, cv2.LINE_AA)
-        if selected_query_index is not None and selected_arm_side is not None:
-            cv2.putText(
-                overlay,
-                f"selected q{selected_query_index} arm={selected_arm_side}",
-                (10, 24),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (255, 255, 255),
-                2,
-                cv2.LINE_AA,
-            )
-        return overlay
-
-    def _publish_suggested_item_markers(
+    def _render_query_alpha_mask(
         self,
         outputs: dict[str, torch.Tensor],
+        query_index: int,
+    ) -> torch.Tensor:
+        patch_alpha = outputs["patch_alpha"][0, query_index : query_index + 1].float()
+        centers = outputs["centers"][0, query_index : query_index + 1].float()
+        sizes = outputs["sizes"][0, query_index : query_index + 1].float()
+        dummy_depth = torch.ones(
+            1,
+            1,
+            1,
+            device=patch_alpha.device,
+            dtype=patch_alpha.dtype,
+        )
+        dummy_depth_scale = torch.ones_like(dummy_depth)
+        _identity, _depth, rendered_occupancy = render_billboards(
+            patch_alpha=patch_alpha.unsqueeze(0),
+            centers=centers.unsqueeze(0),
+            depth=dummy_depth,
+            sizes=sizes.unsqueeze(0),
+            depth_scale=dummy_depth_scale,
+            image_height=self._image_size,
+            image_width=self._image_size,
+        )
+        return rendered_occupancy[0, 0].detach().float()
+
+    def _billboard_world_point(
+        self,
+        query_alpha: torch.Tensor,
+        predicted_depth: torch.Tensor,
         image_header,
         *,
         source_width: int,
         source_height: int,
-    ) -> None:
-        centers = outputs["centers"][0].detach().float()
-        depth = outputs["depth"][0].detach().float()
-        presence_probs = outputs["presence_probs"][0].detach().float().cpu().squeeze(-1)
-        query_indices = torch.nonzero(
-            presence_probs > self._query_presence_threshold,
-            as_tuple=False,
-        ).flatten().tolist()
-        query_indices.sort(key=lambda index: float(presence_probs[index].item()), reverse=True)
-        query_indices = query_indices[: self._max_suggested_markers]
-
-        marker_array = MarkerArray()
-        delete_marker = Marker()
-        delete_marker.header.frame_id = self._target_frame_id
-        delete_marker.header.stamp = image_header.stamp
-        delete_marker.ns = "vision_suggested_items"
-        delete_marker.action = Marker.DELETEALL
-        marker_array.markers.append(delete_marker)
-
-        marker_id = 0
-        for query_index in query_indices:
-            world_point = self._world_point_from_model_prediction(
-                centers[query_index],
-                depth[query_index],
-                image_header,
-                source_width=source_width,
-                source_height=source_height,
-            )
-            if world_point is None:
-                continue
-            presence = float(presence_probs[query_index].item())
-            marker = Marker()
-            marker.header = world_point.header
-            marker.ns = "vision_suggested_items"
-            marker.id = marker_id
-            marker.type = Marker.SPHERE
-            marker.action = Marker.ADD
-            marker.pose.position = world_point.point
-            marker.pose.orientation.w = 1.0
-            marker.scale.x = 0.035
-            marker.scale.y = 0.035
-            marker.scale.z = 0.035
-            marker.color.r = 0.1
-            marker.color.g = 0.35
-            marker.color.b = 1.0
-            marker.color.a = max(0.25, min(1.0, presence))
-            marker_array.markers.append(marker)
-            marker_id += 1
-
-        self._suggested_item_markers_publisher.publish(marker_array)
-
-    def _select_candidate(
-        self,
-        outputs: dict[str, torch.Tensor],
-        image_header,
-        source_width: int,
-        source_height: int,
-        resized_rgb: np.ndarray,
-    ) -> None:
-        self._cleanup_pending_candidates()
+    ) -> tuple[PointStamped, PointStamped, dict[str, float]] | None:
         if self._camera_info is None:
-            if self._should_log_selection_debug():
-                self.get_logger().warning(
-                    "Skipping candidate selection: no CameraInfo received yet."
-                )
             return None
-        if len(self._pending_candidates) >= self._max_inflight_candidates:
-            if self._should_log_selection_debug():
-                self.get_logger().warning(
-                    "Skipping candidate selection: inflight candidate limit reached "
-                    f"({len(self._pending_candidates)}/{self._max_inflight_candidates})."
-                )
+        alpha = query_alpha.detach().float()
+        depth = predicted_depth.detach().float()
+        if depth.ndim == 3:
+            depth = depth[0]
+        mask = alpha > self._query_presence_threshold
+        if int(mask.sum().item()) < 4:
+            mask = alpha > max(float(alpha.max().item()) * 0.5, 1e-4)
+        if int(mask.sum().item()) < 4:
             return None
 
-        centers = outputs["centers"][0].detach().float()
-        sizes = outputs["sizes"][0].detach().float()
-        depth = outputs["depth"][0].detach().float()
-        presence_probs = outputs["presence_probs"][0].detach().float().cpu().squeeze(-1)
-        value_probs = outputs["value_probs"][0].detach().float().cpu()
-        valid_query_indices = torch.nonzero(
-            presence_probs > self._query_presence_threshold,
-            as_tuple=False,
-        ).flatten()
-        if valid_query_indices.numel() == 0:
-            if self._should_log_selection_debug():
-                self.get_logger().warning(
-                    "Skipping candidate selection: no query passed presence threshold "
-                    f"{self._query_presence_threshold:.3f}. "
-                    f"presence_max={float(presence_probs.max().item()):.3f} "
-                    f"presence_mean={float(presence_probs.mean().item()):.3f}"
-                )
-            return {
-                "selected_query_index": None,
-                "selected_arm_side": None,
-                "centers": centers,
-                "sizes": sizes,
-                "depth": depth,
-                "presence_probs": presence_probs,
-                "value_probs": value_probs,
-            }
-
-        candidate_pairs: list[tuple[int, str, float]] = []
-        for query_index in valid_query_indices.tolist():
-            candidate_pairs.append((query_index, "left", float(value_probs[query_index, 0].item())))
-            candidate_pairs.append((query_index, "right", float(value_probs[query_index, 1].item())))
-        if not candidate_pairs:
-            return
-
-        effective_epsilon = (
-            self._exploration_epsilon if self._online_training_enabled else 0.0
-        )
-        explored = random.random() < effective_epsilon
-        if explored:
-            query_index, arm_side, selected_value = random.choice(candidate_pairs)
-            selection_mode = "explore"
-        else:
-            query_index, arm_side, selected_value = max(candidate_pairs, key=lambda item: item[2])
-            selection_mode = "greedy"
-
-        model_u = float((centers[query_index, 0].item() + 1.0) * 0.5 * (self._image_size - 1))
-        model_v = float((centers[query_index, 1].item() + 1.0) * 0.5 * (self._image_size - 1))
-        forward_m = float(depth[query_index, 0].item())
+        y_indices, x_indices = torch.nonzero(mask, as_tuple=True)
+        weights = alpha[y_indices, x_indices].clamp_min(1e-6)
+        weight_sum = weights.sum()
+        if float(weight_sum.item()) <= 0.0:
+            return None
+        model_u = float((x_indices.float() * weights).sum().item() / weight_sum.item())
+        model_v = float((y_indices.float() * weights).sum().item() / weight_sum.item())
+        forward_m = float((depth[y_indices, x_indices] * weights).sum().item() / weight_sum.item())
         if forward_m <= 0.0:
-            if self._should_log_selection_debug():
-                self.get_logger().warning(
-                    "Skipping candidate selection: selected query has non-positive depth "
-                    f"(query={query_index}, arm={arm_side}, depth={forward_m:.4f})."
-                )
             return None
 
         scale_x = float(source_width) / float(self._image_size)
@@ -991,11 +945,6 @@ class VisionInferenceNode(Node):
         cx = float(self._camera_info.k[2])
         cy = float(self._camera_info.k[5])
         if fx == 0.0 or fy == 0.0:
-            if self._should_log_selection_debug():
-                self.get_logger().warning(
-                    "Skipping candidate selection: invalid camera intrinsics "
-                    f"(fx={fx:.4f}, fy={fy:.4f})."
-                )
             return None
 
         x_normalized = (u - cx) / fx
@@ -1028,52 +977,189 @@ class VisionInferenceNode(Node):
                 self._moveit_target_frame_id,
                 timeout=Duration(seconds=0.05),
             )
-        except Exception as error:
-            if self._should_log_selection_debug():
-                self.get_logger().warning(
-                    "Skipping candidate selection: TF transform failed "
-                    f"from {camera_pose.header.frame_id} to "
-                    f"{self._target_frame_id}/{self._moveit_target_frame_id}: {error}"
-                )
+        except Exception:
             return None
 
         world_point = PointStamped()
         world_point.header = world_pose.header
         world_point.point = world_pose.pose.position
+        metadata = {
+            "model_u": model_u,
+            "model_v": model_v,
+            "source_u": float(u),
+            "source_v": float(v),
+            "camera_x": float(camera_x),
+            "camera_y": float(camera_y),
+            "camera_z": float(camera_z),
+            "camera_forward_m": float(forward_m),
+            "alpha_area": float(mask.float().sum().item()),
+            "alpha_weight": float(weight_sum.item()),
+        }
+        return world_point, moveit_point, metadata
+
+    def _publish_suggested_item_markers(
+        self,
+        outputs: dict[str, torch.Tensor],
+        image_header,
+        *,
+        source_width: int,
+        source_height: int,
+    ) -> None:
+        patch_alpha = outputs["patch_alpha"][0].detach().float()
+        alpha_scores = patch_alpha.mean(dim=(1, 2)).cpu()
+        query_indices = torch.nonzero(
+            alpha_scores > self._query_presence_threshold,
+            as_tuple=False,
+        ).flatten().tolist()
+        query_indices.sort(key=lambda index: float(alpha_scores[index].item()), reverse=True)
+        query_indices = query_indices[: self._max_suggested_markers]
+        predicted_depth = outputs["predicted_depth"][0].detach().float()
+
+        marker_array = MarkerArray()
+        delete_marker = Marker()
+        delete_marker.header.frame_id = self._target_frame_id
+        delete_marker.header.stamp = image_header.stamp
+        delete_marker.ns = "vision_suggested_items"
+        delete_marker.action = Marker.DELETEALL
+        marker_array.markers.append(delete_marker)
+
+        marker_id = 0
+        for query_index in query_indices:
+            query_alpha = self._render_query_alpha_mask(outputs, query_index)
+            point_result = self._billboard_world_point(
+                query_alpha,
+                predicted_depth,
+                image_header,
+                source_width=source_width,
+                source_height=source_height,
+            )
+            if point_result is None:
+                continue
+            world_point, _moveit_point, _metadata = point_result
+            alpha_score = float(alpha_scores[query_index].item())
+            red, green, blue = _value_to_rgb(alpha_score)
+            marker = Marker()
+            marker.header = world_point.header
+            marker.ns = "vision_suggested_items"
+            marker.id = marker_id
+            marker.type = Marker.SPHERE
+            marker.action = Marker.ADD
+            marker.pose.position = world_point.point
+            marker.pose.orientation.w = 1.0
+            marker.scale.x = 0.035
+            marker.scale.y = 0.035
+            marker.scale.z = 0.035
+            marker.color.r = red
+            marker.color.g = green
+            marker.color.b = blue
+            marker.color.a = max(0.25, min(1.0, alpha_score))
+            marker_array.markers.append(marker)
+            marker_id += 1
+
+        self._suggested_item_markers_publisher.publish(marker_array)
+
+    def _select_candidate(
+        self,
+        outputs: dict[str, torch.Tensor],
+        image_header,
+        source_width: int,
+        source_height: int,
+        resized_rgb: np.ndarray,
+    ) -> None:
+        self._cleanup_pending_candidates()
+        if self._camera_info is None:
+            if self._should_log_selection_debug():
+                self.get_logger().warning(
+                    "Skipping candidate selection: no CameraInfo received yet."
+                )
+            return {"selected_query_index": None, "selected_mask": None}
+        if len(self._pending_candidates) >= self._max_inflight_candidates:
+            if self._should_log_selection_debug():
+                self.get_logger().warning(
+                    "Skipping candidate selection: inflight candidate limit reached "
+                    f"({len(self._pending_candidates)}/{self._max_inflight_candidates})."
+                )
+            return {"selected_query_index": None, "selected_mask": None}
+
+        patch_alpha = outputs["patch_alpha"][0].detach().float()
+        alpha_scores = patch_alpha.mean(dim=(1, 2)).cpu()
+        valid_query_indices = torch.nonzero(
+            alpha_scores > self._query_presence_threshold,
+            as_tuple=False,
+        ).flatten()
+        if valid_query_indices.numel() == 0:
+            if self._should_log_selection_debug():
+                self.get_logger().warning(
+                    "Skipping candidate selection: no billboard passed alpha threshold "
+                    f"{self._query_presence_threshold:.3f}. "
+                    f"alpha_max={float(alpha_scores.max().item()):.3f} "
+                    f"alpha_mean={float(alpha_scores.mean().item()):.3f}"
+                )
+            return {"selected_query_index": None, "selected_mask": None}
+
+        effective_epsilon = (
+            self._exploration_epsilon if self._online_training_enabled else 0.0
+        )
+        explored = random.random() < effective_epsilon
+        if explored:
+            query_index = int(random.choice(valid_query_indices.tolist()))
+            selection_mode = "explore"
+        else:
+            query_index = int(
+                max(valid_query_indices.tolist(), key=lambda index: float(alpha_scores[index].item()))
+            )
+            selection_mode = "greedy"
+        selected_score = float(alpha_scores[query_index].item())
+        query_value_probs = outputs["value_probs"][0, query_index].detach().float().cpu()
+        value_left = float(query_value_probs[0].item())
+        value_right = float(query_value_probs[1].item())
+        selected_value = max(value_left, value_right)
+
+        query_alpha = self._render_query_alpha_mask(outputs, query_index)
+        point_result = self._billboard_world_point(
+            query_alpha,
+            outputs["predicted_depth"][0].detach().float(),
+            image_header,
+            source_width=source_width,
+            source_height=source_height,
+        )
+        if point_result is None:
+            if self._should_log_selection_debug():
+                self.get_logger().warning(
+                    "Skipping candidate selection: selected billboard could not be "
+                    f"projected (query={query_index}, alpha_score={selected_score:.3f})."
+                )
+            return {"selected_query_index": query_index, "selected_mask": query_alpha.cpu().numpy()}
+
+        world_point, moveit_point, projection = point_result
         stamp_ns = (
             int(world_point.header.stamp.sec) * 1_000_000_000
             + int(world_point.header.stamp.nanosec)
         )
         self._selection_serial += 1
-        candidate_id = (
-            f"{stamp_ns}-{self._selection_serial:06d}-{query_index:02d}-{arm_side}"
-        )
+        candidate_id = f"{stamp_ns}-{self._selection_serial:06d}-{query_index:02d}-auto"
         candidate_payload = {
             "candidate_id": candidate_id,
-            "arm_side": arm_side,
+            "arm_side": "",
             "selection_mode": selection_mode,
             "query_index": int(query_index),
             "stamp_ns": stamp_ns,
-            "presence": float(presence_probs[query_index].item()),
-            "value_left": float(value_probs[query_index, 0].item()),
-            "value_right": float(value_probs[query_index, 1].item()),
-            "selected_value": float(selected_value),
-            "model_center_xy": [
-                float(centers[query_index, 0].item()),
-                float(centers[query_index, 1].item()),
-            ],
-            "model_size_xy": [
-                float(sizes[query_index, 0].item()),
-                float(sizes[query_index, 1].item()),
-            ],
-            "image_uv": [float(u), float(v)],
+            "presence": selected_score,
+            "value_left": value_left,
+            "value_right": value_right,
+            "selected_value": selected_value,
+            "model_uv": [projection["model_u"], projection["model_v"]],
+            "image_uv": [projection["source_u"], projection["source_v"]],
             "camera_point_xyz": [
-                float(camera_pose.pose.position.x),
-                float(camera_pose.pose.position.y),
-                float(camera_pose.pose.position.z),
+                projection["camera_x"],
+                projection["camera_y"],
+                projection["camera_z"],
             ],
-            "camera_forward_m": float(forward_m),
+            "camera_forward_m": projection["camera_forward_m"],
             "camera_frame_convention": self._camera_frame_convention,
+            "billboard_alpha_score": selected_score,
+            "billboard_alpha_area": projection["alpha_area"],
+            "billboard_alpha_weight": projection["alpha_weight"],
             "world_point": self._serialize_point(world_point),
             "moveit_point": self._serialize_point(moveit_point),
         }
@@ -1085,8 +1171,8 @@ class VisionInferenceNode(Node):
         reprojection_error_px = None
         if reprojected_model_uv is not None:
             reprojection_error_px = math.hypot(
-                float(reprojected_model_uv[0]) - model_u,
-                float(reprojected_model_uv[1]) - model_v,
+                float(reprojected_model_uv[0]) - projection["model_u"],
+                float(reprojected_model_uv[1]) - projection["model_v"],
             )
             candidate_payload["reprojected_model_uv"] = reprojected_model_uv
             candidate_payload["reprojection_error_px"] = float(reprojection_error_px)
@@ -1099,25 +1185,26 @@ class VisionInferenceNode(Node):
         self._selected_candidate_publisher.publish(_encode_payload(candidate_payload))
         self._pending_candidates[candidate_id] = {
             "candidate_id": candidate_id,
-            "arm_side": arm_side,
-            "arm_index": 0 if arm_side == "left" else 1,
+            "arm_side": "auto",
+            "arm_index": -1,
             "query_index": int(query_index),
             "selection_mode": selection_mode,
-            "selected_value": float(selected_value),
+            "selected_value": selected_value,
+            "value_left": value_left,
+            "value_right": value_right,
+            "presence": selected_score,
             "created_monotonic": time.monotonic(),
-            "model_uv": [float(model_u), float(model_v)],
+            "model_uv": [projection["model_u"], projection["model_v"]],
             "world_point": candidate_payload["world_point"],
             "gt_targets": gt_targets,
             "rgb": np.ascontiguousarray(resized_rgb.copy()),
         }
         if self._writer is not None:
-            self._writer.add_scalar("selection/selected_value", float(selected_value), self._frame_count)
+            self._writer.add_scalar("selection/presence", selected_score, self._frame_count)
+            self._writer.add_scalar("selection/selected_value", selected_value, self._frame_count)
+            self._writer.add_scalar("selection/value_left", value_left, self._frame_count)
+            self._writer.add_scalar("selection/value_right", value_right, self._frame_count)
             self._writer.add_scalar("selection/explored", 1.0 if explored else 0.0, self._frame_count)
-            self._writer.add_scalar(
-                f"selection/{arm_side}_selected",
-                1.0,
-                self._frame_count,
-            )
         if self._should_log_projection_debug():
             reprojected_text = (
                 "none"
@@ -1130,8 +1217,9 @@ class VisionInferenceNode(Node):
                 else f"{reprojection_error_px:.2f}"
             )
             self.get_logger().info(
-                f"Selected candidate {candidate_id} query={query_index} arm={arm_side} "
-                f"mode={selection_mode} value={selected_value:.3f} "
+                f"Selected billboard candidate {candidate_id} query={query_index} "
+                f"mode={selection_mode} alpha_score={selected_score:.3f} "
+                f"value_left={value_left:.3f} value_right={value_right:.3f} "
                 f"moveit=({moveit_point.point.x:.3f}, {moveit_point.point.y:.3f}, {moveit_point.point.z:.3f}) "
                 f"camera_frame_convention={self._camera_frame_convention} "
                 f"gt_targets={len(gt_targets)}"
@@ -1142,12 +1230,11 @@ class VisionInferenceNode(Node):
                 f"camera_info_frame={self._camera_info.header.frame_id!r}; "
                 f"source_size=({source_width}, {source_height}); "
                 f"model_size={self._image_size}; "
-                f"model_uv=({model_u:.1f}, {model_v:.1f}); "
-                f"source_uv=({u:.1f}, {v:.1f}); "
-                f"K=(fx={fx:.3f}, fy={fy:.3f}, cx={cx:.3f}, cy={cy:.3f}); "
-                f"norm=({x_normalized:.4f}, {y_normalized:.4f}); "
-                f"forward_m={forward_m:.4f}; "
-                f"camera_xyz=({camera_x:.4f}, {camera_y:.4f}, {camera_z:.4f}); "
+                f"model_uv=({projection['model_u']:.1f}, {projection['model_v']:.1f}); "
+                f"source_uv=({projection['source_u']:.1f}, {projection['source_v']:.1f}); "
+                f"forward_m={projection['camera_forward_m']:.4f}; "
+                f"camera_xyz=({projection['camera_x']:.4f}, "
+                f"{projection['camera_y']:.4f}, {projection['camera_z']:.4f}); "
                 f"world_xyz=({world_point.point.x:.4f}, {world_point.point.y:.4f}, {world_point.point.z:.4f}); "
                 f"moveit_xyz=({moveit_point.point.x:.4f}, {moveit_point.point.y:.4f}, {moveit_point.point.z:.4f}); "
                 f"reprojected_model_uv={reprojected_text}; "
@@ -1155,12 +1242,7 @@ class VisionInferenceNode(Node):
             )
         return {
             "selected_query_index": int(query_index),
-            "selected_arm_side": arm_side,
-            "centers": centers,
-            "sizes": sizes,
-            "depth": depth,
-            "presence_probs": presence_probs,
-            "value_probs": value_probs,
+            "selected_mask": query_alpha.cpu().numpy(),
         }
 
     def _handle_arm_state(self, message: String) -> None:
@@ -1175,36 +1257,55 @@ class VisionInferenceNode(Node):
         step_name = str(plan_outcome.get("step_name", "")).strip().lower()
         if not request_id or not candidate_id or step_name != "approach pregrasp":
             return
-        if request_id in self._seen_plan_outcomes:
+        outcome_key = (candidate_id, request_id, step_name)
+        if outcome_key in self._seen_plan_outcomes:
             return
-        self._seen_plan_outcomes.add(request_id)
+        self._seen_plan_outcomes.add(outcome_key)
         pending = self._pending_candidates.pop(candidate_id, None)
         if pending is None:
             return
 
         success = 1.0 if bool(plan_outcome.get("success")) else 0.0
+        outcome_arm_side = str(plan_outcome.get("arm_side") or pending["arm_side"]).strip()
+        outcome_arm_index = _arm_side_to_index(outcome_arm_side)
+        if outcome_arm_index is None:
+            self.get_logger().warning(
+                "Skipping value feedback replay sample with unknown arm side: "
+                f"candidate_id={candidate_id}; request_id={request_id}; "
+                f"arm_side={outcome_arm_side!r}"
+            )
+            return
         replay_item = {
             "rgb": pending["rgb"],
+            "candidate_id": candidate_id,
+            "request_id": request_id,
             "query_index": int(pending["query_index"]),
-            "arm_index": int(pending["arm_index"]),
+            "arm_index": int(outcome_arm_index),
             "label": float(success),
             "selection_mode": pending["selection_mode"],
             "selected_value": float(pending["selected_value"]),
-            "arm_side": pending["arm_side"],
+            "value_left": float(pending.get("value_left", 0.0)),
+            "value_right": float(pending.get("value_right", 0.0)),
+            "presence": float(pending.get("presence", 0.0)),
+            "arm_side": outcome_arm_side,
             "planning_time": float(plan_outcome.get("planning_time") or 0.0),
             "model_uv": pending.get("model_uv"),
             "gt_targets": list(pending.get("gt_targets") or []),
         }
-        self._replay_buffer.append(replay_item)
-        self._outcome_count += 1
-        if self._online_training_enabled:
+        try:
             self._write_replay_sample(replay_item, candidate_id, request_id)
+        except Exception as error:
+            self.get_logger().warning(
+                "Failed to write value feedback replay sample: "
+                f"candidate_id={candidate_id}; request_id={request_id}; error={error}"
+            )
+        self._outcome_count += 1
         self.get_logger().info(
-            "Replay label accepted: "
+            "Pick feedback accepted: "
             f"candidate_id={candidate_id}; request_id={request_id}; "
             f"success={bool(success)}; "
-            f"replay_size={len(self._replay_buffer)}/{self._min_replay_size}; "
-            f"replay_recording={self._online_training_enabled}; "
+            f"arm_side={outcome_arm_side}; arm_index={outcome_arm_index}; "
+            f"query_index={replay_item['query_index']}; "
             f"checkpoint_step={self._train_step}; "
             f"gt_targets={len(replay_item['gt_targets'])}; "
             f"stored_model_uv={pending.get('model_uv')}; "
@@ -1215,7 +1316,7 @@ class VisionInferenceNode(Node):
             step = self._outcome_count
             self._writer.add_scalar("planner/approach_pregrasp_success", success, step)
             self._writer.add_scalar(
-                f"planner/approach_pregrasp_success_{pending['arm_side']}",
+                f"planner/approach_pregrasp_success_{outcome_arm_side}",
                 success,
                 step,
             )
@@ -1233,6 +1334,21 @@ class VisionInferenceNode(Node):
 
         self._log_training_mode_periodically()
 
+    def _handle_reset(self, message: String) -> None:
+        payload = _decode_payload(message)
+        reset_reason = ""
+        if isinstance(payload, dict):
+            reset_reason = str(payload.get("reason", "")).strip()
+        pending_count = len(self._pending_candidates)
+        outcome_count = len(self._seen_plan_outcomes)
+        self._pending_candidates.clear()
+        self._seen_plan_outcomes.clear()
+        self.get_logger().info(
+            "Received vision reset"
+            + (f" reason={reset_reason}" if reset_reason else "")
+            + f"; cleared_pending={pending_count}; cleared_seen_outcomes={outcome_count}"
+        )
+
     def _log_training_mode_periodically(self) -> None:
         if not self._online_training_enabled:
             return
@@ -1244,11 +1360,10 @@ class VisionInferenceNode(Node):
             return
         self._last_training_mode_log_monotonic = now
         self.get_logger().info(
-            "Vision mode: replay-recording; "
-            f"replay_size={len(self._replay_buffer)}/{self._min_replay_size}; "
+            "Vision mode: online-billboard-inference; "
             f"pending_candidates={len(self._pending_candidates)}; "
             f"checkpoint_step={self._train_step}; "
-            f"replay_dir={self._replay_dir}"
+            f"checkpoint_reload_period_sec={self._checkpoint_reload_period_sec:.1f}"
         )
 
     def _handle_image(self, message: Image) -> None:
@@ -1271,7 +1386,7 @@ class VisionInferenceNode(Node):
                 device_type=self._device.type,
                 enabled=self._use_mixed_precision and self._device.type == "cuda",
             ):
-                outputs = self._model(pixel_values)
+                outputs = self._model(pixel_values, render_outputs=True)
         inference_elapsed = time.perf_counter() - start_time
 
         self._publish_suggested_item_markers(
@@ -1291,23 +1406,15 @@ class VisionInferenceNode(Node):
         if selection_debug is None:
             selection_debug = {
                 "selected_query_index": None,
-                "selected_arm_side": None,
-                "centers": outputs["centers"][0].detach().float(),
-                "sizes": outputs["sizes"][0].detach().float(),
-                "depth": outputs["depth"][0].detach().float(),
-                "presence_probs": outputs["presence_probs"][0].detach().float().cpu().squeeze(-1),
-                "value_probs": outputs["value_probs"][0].detach().float().cpu(),
+                "selected_mask": None,
             }
-        debug_overlay = self._build_debug_overlay(
+        debug_overlay = _compose_debug_panel(
             resized_rgb,
-            selection_debug["centers"],
-            selection_debug["sizes"],
-            selection_debug["depth"],
-            selection_debug["presence_probs"],
-            selection_debug["value_probs"],
-            selection_debug["selected_query_index"],
-            selection_debug["selected_arm_side"],
-            self._ground_truth_items,
+            outputs["predicted_identity"][0].detach().float(),
+            outputs["predicted_depth"][0].detach().float(),
+            outputs["predicted_occupancy"][0].detach().float(),
+            outputs["value_probs"][0].detach().float(),
+            selection_debug.get("selected_mask"),
         )
         self._debug_image_publisher.publish(
             _rgb_array_to_image_message(debug_overlay, header=message.header, encoding="rgb8")
@@ -1315,6 +1422,14 @@ class VisionInferenceNode(Node):
 
         self._frame_count += 1
         self._inference_time_sum += inference_elapsed
+        if self._frame_count % DEFAULT_LOG_EVERY == 0:
+            average_ms = 1000.0 * self._inference_time_sum / max(self._frame_count, 1)
+            self.get_logger().info(
+                "Published vision debug frame "
+                f"count={self._frame_count}; "
+                f"debug_size={debug_overlay.shape[1]}x{debug_overlay.shape[0]}; "
+                f"avg_inference_ms={average_ms:.1f}"
+            )
         if self._writer is not None:
             self._writer.add_scalar("inference/frame_time_sec", inference_elapsed, self._frame_count)
 

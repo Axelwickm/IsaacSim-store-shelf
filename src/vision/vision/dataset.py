@@ -24,12 +24,14 @@ def _stable_sample_float(sample_id: str) -> float:
 
 
 def _split_matches(sample_id: str, split: str, train_split_threshold: float) -> bool:
+    if split == "all":
+        return True
     sample_value = _stable_sample_float(sample_id)
     if split == "train":
         return sample_value < train_split_threshold
     if split == "test":
         return sample_value >= train_split_threshold
-    raise ValueError(f"Unsupported split {split!r}; expected 'train' or 'test'")
+    raise ValueError(f"Unsupported split {split!r}; expected 'all', 'train', or 'test'")
 
 
 def _decode_instance_segmentation_ids(segmentation: np.ndarray) -> np.ndarray:
@@ -93,13 +95,14 @@ class StoreShelfVisionDataset(Dataset):
         split: str = "train",
         train_split_threshold: float = TRAIN_SPLIT_THRESHOLD,
         image_size: int = DEFAULT_IMAGE_SIZE,
+        allow_empty: bool = False,
     ):
         self.dataset_dir = Path(dataset_dir).resolve()
         self.split = split
         self.train_split_threshold = train_split_threshold
         self.image_size = image_size
         self.sample_ids = self._discover_sample_ids()
-        if not self.sample_ids:
+        if not self.sample_ids and not allow_empty:
             raise ValueError(
                 f"No vision samples found under {self.dataset_dir} for split {self.split!r}"
             )
@@ -139,8 +142,9 @@ class StoreShelfVisionDataset(Dataset):
         return len(self.sample_ids)
 
     def __getitem__(self, index: int) -> dict[str, torch.Tensor | dict | str]:
-        sample_id = self.sample_ids[index]
+        return self.load_sample(self.sample_ids[index])
 
+    def load_sample(self, sample_id: str) -> dict[str, torch.Tensor | dict | str]:
         rgb = cv2.imread(
             str(self.dataset_dir / f"rgb_{sample_id}.png"),
             cv2.IMREAD_UNCHANGED,

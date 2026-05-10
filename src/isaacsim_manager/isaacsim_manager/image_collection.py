@@ -16,6 +16,7 @@ from .scene_construction import (
     apply_capture_semantics,
     build_item_position_pools,
     construct_scene,
+    discover_item_prims,
     find_prim_named,
     randomize_item_position_pools,
     randomize_robot_arm_joints,
@@ -32,13 +33,14 @@ DEFAULT_CAPTURE_WARMUP_SECONDS = 1.0
 DEFAULT_CART_LEFT_OFFSET_METERS = 0.0
 DEFAULT_CART_RIGHT_OFFSET_METERS = 2.0
 DEFAULT_CART_SLIDE_SPEED_METERS_PER_SECOND = 0.25
-DEFAULT_STORE_DEMO_CART_MOTION_ENABLED = False
-DEFAULT_STORE_DEMO_RESET_INTERVAL_SECONDS = 120.0
-DEFAULT_STORE_DEMO_IDLE_RESET_SECONDS = 6.0
+DEFAULT_STORE_DEMO_CART_MOTION_ENABLED = True
+DEFAULT_STORE_DEMO_RESET_INTERVAL_SECONDS = 30.0
+DEFAULT_STORE_DEMO_IDLE_RESET_SECONDS = 5.0
 DEFAULT_GROUND_TRUTH_ITEMS_TOPIC = "/vision/ground_truth_items"
 DEFAULT_COORDINATOR_STATE_TOPIC = "/motion/coordinator_state"
 DEFAULT_MOTION_RESET_TOPIC = "/motion/reset"
 DEFAULT_GROUND_TRUTH_ITEMS_PUBLISH_PERIOD_SECONDS = 0.2
+DEFAULT_STORE_DEMO_DEBUG_LOG_PERIOD_SECONDS = 5.0
 SIMULATION_STEP_SECONDS = 1.0 / 60.0
 
 _replicator_capture_enabled = False
@@ -134,20 +136,19 @@ def _publish_ground_truth_items(flow_state: dict) -> None:
     _ground_truth_items_publish_elapsed = 0.0
 
     items = []
-    for pool in flow_state.get("item_position_pools", []):
-        for item_prim in pool:
-            if not item_prim.IsValid() or not item_prim.IsActive():
-                continue
-            center_xyz = _prim_world_center(item_prim)
-            if center_xyz is None:
-                continue
-            items.append(
-                {
-                    "name": item_prim.GetName(),
-                    "path": item_prim.GetPath().pathString,
-                    "center_xyz": center_xyz,
-                }
-            )
+    for item_prim in flow_state.get("item_prims", []):
+        if not item_prim.IsValid() or not item_prim.IsActive():
+            continue
+        center_xyz = _prim_world_center(item_prim)
+        if center_xyz is None:
+            continue
+        items.append(
+            {
+                "name": item_prim.GetName(),
+                "path": item_prim.GetPath().pathString,
+                "center_xyz": center_xyz,
+            }
+        )
 
     message = String()
     message.data = json.dumps(
@@ -175,6 +176,29 @@ def _controller_is_idle() -> bool:
     active_step = _latest_coordinator_state.get("active_step")
     assigned_target = _latest_coordinator_state.get("assigned_target")
     return not isinstance(active_step, dict) and not isinstance(assigned_target, dict)
+
+
+def _coordinator_state_summary() -> str:
+    if not isinstance(_latest_coordinator_state, dict):
+        return "unavailable"
+    active_step = _latest_coordinator_state.get("active_step")
+    assigned_target = _latest_coordinator_state.get("assigned_target")
+    active_name = ""
+    active_arm = ""
+    if isinstance(active_step, dict):
+        active_name = str(active_step.get("name", "")).strip()
+        active_arm = str(active_step.get("arm_side", "")).strip()
+    assigned_arm = ""
+    candidate_id = ""
+    if isinstance(assigned_target, dict):
+        assigned_arm = str(assigned_target.get("arm_side", "")).strip()
+        candidate_id = str(assigned_target.get("candidate_id", "")).strip()
+    return (
+        f"active_step={active_name or 'none'}"
+        f"{('/' + active_arm) if active_arm else ''}; "
+        f"assigned={assigned_arm or 'none'}"
+        f"{('/' + candidate_id) if candidate_id else ''}"
+    )
 
 
 def _publish_motion_reset(reason: str) -> None:
@@ -365,6 +389,38 @@ def _reset_store_demo_flow(flow_state: dict) -> None:
     _schedule_next_store_demo_reset(flow_state)
 
 
+def _store_demo_has_active_trajectory() -> bool:
+    return any(executor.has_active_trajectory() for executor in _trajectory_executors)
+
+
+def _store_demo_active_trajectory_count() -> int:
+    return sum(1 for executor in _trajectory_executors if executor.has_active_trajectory())
+
+
+def _log_store_demo_flow_debug(flow_state: dict, now: float, *, prefix: str = "heartbeat") -> None:
+    last_log = float(flow_state.get("last_flow_debug_log", 0.0))
+    if now - last_log < DEFAULT_STORE_DEMO_DEBUG_LOG_PERIOD_SECONDS:
+        return
+    flow_state["last_flow_debug_log"] = now
+    reset_due_in = flow_state["next_reset_monotonic"] - now
+    idle_started = flow_state.get("controller_idle_started_monotonic")
+    idle_elapsed = 0.0 if idle_started is None else max(now - float(idle_started), 0.0)
+    print(
+        "[store_shelf] Store demo flow "
+        f"{prefix}: "
+        f"timeline_playing={_timeline_is_playing() if _timeline_autoplay_enabled else 'n/a'}; "
+        f"reset_due_in={reset_due_in:.1f}s; "
+        f"idle_elapsed={idle_elapsed:.1f}s; "
+        f"controller_idle={_controller_is_idle()}; "
+        f"active_trajectories={_store_demo_active_trajectory_count()}; "
+        f"capture_due_in={flow_state.get('time_until_capture', 0.0):.2f}s; "
+        f"capture_frame={flow_state.get('capture_frame_index', 0)}; "
+        f"cart_offset={flow_state.get('cart_x_offset', 0.0):.3f}m; "
+        f"coordinator=({_coordinator_state_summary()})",
+        flush=True,
+    )
+
+
 def _update_collection_flow(flow_state: dict) -> None:
     global _replicator_capture_enabled
 
@@ -408,49 +464,85 @@ def _update_collection_flow(flow_state: dict) -> None:
 def _update_store_demo_flow(flow_state: dict) -> None:
     global _trajectory_executors
 
-    if _timeline_autoplay_enabled and not _timeline_is_playing():
-        return
-
-    if flow_state["cart_motion_enabled"]:
-        x_offset = min(
-            flow_state["cart_x_offset"]
-            + flow_state["cart_slide_speed"] * SIMULATION_STEP_SECONDS,
-            flow_state["cart_right_offset"],
-        )
-        flow_state["cart_x_offset"] = x_offset
-        _set_cart_x_offset(
-            flow_state["cart_prim"],
-            flow_state["cart_base_translation"],
-            x_offset,
-        )
+    now = time.monotonic()
+    timeline_paused = _timeline_autoplay_enabled and not _timeline_is_playing()
+    if timeline_paused:
+        _play_timeline_if_needed()
+        _log_store_demo_flow_debug(flow_state, now, prefix="timeline-paused")
+    else:
+        _log_store_demo_flow_debug(flow_state, now)
+    if now >= flow_state["next_reset_monotonic"]:
+        if _store_demo_has_active_trajectory():
+            last_blocked_log = float(flow_state.get("last_reset_blocked_log", 0.0))
+            if now - last_blocked_log >= 2.0:
+                _log_store_demo_flow_debug(flow_state, now, prefix="reset-blocked")
+                print(
+                    "[store_shelf] Store demo timed reset due but blocked by active trajectory",
+                    flush=True,
+                )
+                flow_state["last_reset_blocked_log"] = now
+        else:
+            print("[store_shelf] Store demo timed reset firing", flush=True)
+            flow_state["reset_reason"] = "timer"
+            _reset_store_demo_flow(flow_state)
+            return
 
     if _controller_is_idle():
         if flow_state["controller_idle_started_monotonic"] is None:
-            flow_state["controller_idle_started_monotonic"] = time.monotonic()
+            flow_state["controller_idle_started_monotonic"] = now
     else:
         flow_state["controller_idle_started_monotonic"] = None
 
     idle_started_monotonic = flow_state["controller_idle_started_monotonic"]
     if (
         idle_started_monotonic is not None
-        and time.monotonic() - idle_started_monotonic >= flow_state["idle_reset_seconds"]
+        and now - idle_started_monotonic >= flow_state["idle_reset_seconds"]
     ):
         print(
             "[store_shelf] Store demo idle reset firing "
-            f"idle_elapsed={time.monotonic() - idle_started_monotonic:.3f}s",
+            f"idle_elapsed={now - idle_started_monotonic:.3f}s",
             flush=True,
         )
         flow_state["reset_reason"] = "idle"
         _reset_store_demo_flow(flow_state)
         return
 
-    if time.monotonic() < flow_state["next_reset_monotonic"]:
+    if timeline_paused:
         return
-    if any(executor.has_active_trajectory() for executor in _trajectory_executors):
-        return
-    print("[store_shelf] Store demo timed reset firing", flush=True)
-    flow_state["reset_reason"] = "timer"
-    _reset_store_demo_flow(flow_state)
+
+    if _replicator_capture_enabled:
+        flow_state["time_until_capture"] -= SIMULATION_STEP_SECONDS
+        if flow_state["time_until_capture"] <= 0.0:
+            _write_capture_metadata(flow_state, flow_state["cart_x_offset"])
+            import omni.replicator.core as rep
+
+            rep.orchestrator.step(rt_subframes=1)
+            print(
+                "[store_shelf] Captured store-demo training image "
+                f"frame={flow_state['capture_frame_index']:04d} "
+                f"run_id={flow_state['run_id']} "
+                f"cart_x_offset={flow_state['cart_x_offset']:.3f}m",
+                flush=True,
+            )
+            flow_state["capture_frame_index"] += 1
+            flow_state["capture_index_in_run"] += 1
+            flow_state["time_until_capture"] = flow_state["capture_interval_seconds"]
+
+    if flow_state["cart_motion_enabled"]:
+        x_offset = (
+            flow_state["cart_x_offset"]
+            + flow_state["cart_slide_speed"] * SIMULATION_STEP_SECONDS
+        )
+        if x_offset >= flow_state["cart_right_offset"]:
+            x_offset = flow_state["cart_left_offset"]
+            if not any(executor.has_active_trajectory() for executor in _trajectory_executors):
+                _randomize_items(flow_state["item_position_pools"])
+        flow_state["cart_x_offset"] = x_offset
+        _set_cart_x_offset(
+            flow_state["cart_prim"],
+            flow_state["cart_base_translation"],
+            x_offset,
+        )
 
 
 def update_simulation_app(simulation_app) -> None:
@@ -513,6 +605,7 @@ def _setup_store_shelf_scene(
     if capture_enabled:
         output_dir = _setup_replicator_capture(scene["stage"], scene["robot_prim_path"])
     item_position_pools = build_item_position_pools(scene["stage"])
+    item_prims = discover_item_prims(scene["stage"])
     cart_left_offset = float(
         os.environ.get(
             "ISAACSIM_CART_LEFT_OFFSET",
@@ -579,6 +672,7 @@ def _setup_store_shelf_scene(
             "cart_prim": scene["cart_prim"],
             "cart_base_translation": scene["cart_base_translation"],
             "item_position_pools": item_position_pools,
+            "item_prims": item_prims,
             "cart_left_offset": cart_left_offset,
             "cart_right_offset": cart_right_offset,
             "captures_per_run": captures_per_run,
@@ -604,6 +698,7 @@ def _setup_store_shelf_scene(
             "cart_prim": scene["cart_prim"],
             "cart_base_translation": scene["cart_base_translation"],
             "item_position_pools": item_position_pools,
+            "item_prims": item_prims,
             "cart_x_offset": cart_left_offset,
             "cart_left_offset": cart_left_offset,
             "cart_right_offset": cart_right_offset,
@@ -614,6 +709,17 @@ def _setup_store_shelf_scene(
             "controller_idle_started_monotonic": None,
             "next_reset_monotonic": time.monotonic() + store_demo_reset_interval_seconds,
             "reset_reason": "startup",
+            "output_dir": output_dir,
+            "capture_frame_index": 0,
+            "capture_index_in_run": 0,
+            "run_index": 1,
+            "run_id": uuid.uuid4().hex,
+            "captures_per_run": captures_per_run,
+            "capture_interval_seconds": capture_interval_seconds,
+            "time_until_capture": capture_warmup_seconds,
+            "arm_joint_positions": {},
+            "last_flow_debug_log": 0.0,
+            "last_reset_blocked_log": 0.0,
         }
         _reset_store_demo_flow(_flow_state)
         print(
@@ -688,6 +794,7 @@ def _setup_store_shelf_scene(
             f"publishing motion reset topic={motion_reset_topic}",
             flush=True,
         )
+        _publish_motion_reset("startup")
         from .trajectory_executor import IsaacSimTrajectoryExecutor
 
         from .trajectory_executor import LEFT_ARM_JOINTS, RIGHT_ARM_JOINTS
@@ -736,6 +843,7 @@ def _setup_store_shelf_scene(
     return (
         f"Loaded {configuration} scene {scene['scene_path']} with robot at "
         f"{scene['robot_prim_path']}; item_pools={len(item_position_pools)}; "
+        f"items={len(item_prims)}; "
         f"replicator_output={output_dir or 'disabled'}"
     )
 
@@ -760,5 +868,5 @@ def store_demo(simulation_app) -> str:
     return _setup_store_shelf_scene(
         simulation_app,
         configuration="store_demo",
-        capture_enabled=False,
+        capture_enabled=True,
     )

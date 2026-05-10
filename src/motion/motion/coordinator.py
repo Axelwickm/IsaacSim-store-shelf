@@ -101,7 +101,7 @@ class MotionCoordinatorNode(Node):
             stamp_ns <= 0
             or not isinstance(world_point, dict)
             or not isinstance(moveit_point, dict)
-            or arm_side not in {"left", "right"}
+            or arm_side not in {"", "left", "right"}
         ):
             return
         candidate = {
