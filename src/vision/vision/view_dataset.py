@@ -7,7 +7,7 @@ import rclpy
 from rclpy.node import Node
 
 
-DEFAULT_DATASET_DIR = Path("/workspace/collect_vision_data_output")
+DEFAULT_DATASET_DIR = Path("/workspace/replay")
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".exr")
 
 

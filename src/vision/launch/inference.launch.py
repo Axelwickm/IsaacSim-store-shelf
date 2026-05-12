@@ -1,6 +1,5 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
@@ -54,19 +53,14 @@ def generate_launch_description() -> LaunchDescription:
                 description="Planner arm-state topic used for online replay labels.",
             ),
             DeclareLaunchArgument(
-                "online_training_enabled",
+                "collect_training_data",
                 default_value="false",
-                description="Record replay samples and launch the external online trainer.",
+                description="Record planner feedback replay samples for later training.",
             ),
             DeclareLaunchArgument(
                 "replay_dir",
-                default_value="/workspace/replay/vision",
+                default_value="/workspace/replay",
                 description="Directory used as the durable replay-sample queue.",
-            ),
-            DeclareLaunchArgument(
-                "dataset_dir",
-                default_value="/workspace/collect_vision_data_output",
-                description="Replicator dataset directory scanned by online billboard training.",
             ),
             DeclareLaunchArgument(
                 "checkpoint_reload_period_sec",
@@ -92,79 +86,6 @@ def generate_launch_description() -> LaunchDescription:
                 "camera_frame_convention",
                 default_value="ros_optical",
                 description="Camera TF convention: usd_camera or ros_optical.",
-            ),
-            DeclareLaunchArgument(
-                "replay_buffer_capacity",
-                default_value="8000",
-                description="Maximum number of replay samples kept in memory.",
-            ),
-            DeclareLaunchArgument(
-                "min_replay_size",
-                default_value="2",
-                description="Minimum replay samples required before online training begins.",
-            ),
-            DeclareLaunchArgument(
-                "train_batch_size",
-                default_value="16",
-                description="Batch size for online replay-buffer updates.",
-            ),
-            DeclareLaunchArgument(
-                "train_steps_per_tick",
-                default_value="4",
-                description="Maximum online optimizer steps to run per timer tick.",
-            ),
-            DeclareLaunchArgument(
-                "train_tick_period_sec",
-                default_value="0.01",
-                description="Seconds between online optimizer timer ticks.",
-            ),
-            DeclareLaunchArgument(
-                "online_learning_rate",
-                default_value="2e-4",
-                description="Learning rate for online replay-buffer training.",
-            ),
-            DeclareLaunchArgument(
-                "geometry_loss_weight",
-                default_value="1.0",
-                description="Weight for online billboard instance-segmentation supervision.",
-            ),
-            DeclareLaunchArgument(
-                "presence_loss_weight",
-                default_value="0.2",
-                description="Weight for online missed-occupancy supervision.",
-            ),
-            DeclareLaunchArgument(
-                "depth_loss_weight",
-                default_value="0.2",
-                description="Weight for online billboard depth supervision.",
-            ),
-            DeclareLaunchArgument(
-                "value_loss_weight",
-                default_value="1.0",
-                description="Weight for online arm-conditioned planner-success supervision.",
-            ),
-            DeclareLaunchArgument(
-                "sample_prefetch_size",
-                default_value="64",
-                description="Decoded Replicator sample cache target for online trainer.",
-            ),
-            DeclareLaunchArgument(
-                "sample_loader_workers",
-                default_value="2",
-                description="Background workers used by the online trainer to decode samples.",
-            ),
-            DeclareLaunchArgument(
-                "tensorboard_log_dir",
-                default_value="/workspace/tensorboard/vision",
-                description="TensorBoard base log directory used only when online training is enabled.",
-            ),
-            DeclareLaunchArgument(
-                "tensorboard_run_name",
-                default_value="",
-                description=(
-                    "Optional TensorBoard run subdirectory name. If empty, a unique "
-                    "timestamped name is generated or reused from a loaded checkpoint."
-                ),
             ),
             DeclareLaunchArgument(
                 "use_mixed_precision",
@@ -195,7 +116,7 @@ def generate_launch_description() -> LaunchDescription:
                             "ground_truth_items_topic"
                         ),
                         "arm_state_topic": LaunchConfiguration("arm_state_topic"),
-                        "online_training_enabled": LaunchConfiguration("online_training_enabled"),
+                        "collect_training_data": LaunchConfiguration("collect_training_data"),
                         "replay_dir": LaunchConfiguration("replay_dir"),
                         "checkpoint_reload_period_sec": LaunchConfiguration(
                             "checkpoint_reload_period_sec"
@@ -204,51 +125,8 @@ def generate_launch_description() -> LaunchDescription:
                         "query_presence_threshold": LaunchConfiguration("query_presence_threshold"),
                         "max_suggested_markers": LaunchConfiguration("max_suggested_markers"),
                         "camera_frame_convention": LaunchConfiguration("camera_frame_convention"),
-                        "replay_buffer_capacity": LaunchConfiguration("replay_buffer_capacity"),
-                        "min_replay_size": LaunchConfiguration("min_replay_size"),
-                        "train_batch_size": LaunchConfiguration("train_batch_size"),
-                        "online_learning_rate": LaunchConfiguration("online_learning_rate"),
-                        "geometry_loss_weight": LaunchConfiguration("geometry_loss_weight"),
-                        "presence_loss_weight": LaunchConfiguration("presence_loss_weight"),
-                        "depth_loss_weight": LaunchConfiguration("depth_loss_weight"),
-                        "tensorboard_log_dir": LaunchConfiguration("tensorboard_log_dir"),
-                        "tensorboard_run_name": LaunchConfiguration("tensorboard_run_name"),
                         "image_size": LaunchConfiguration("image_size"),
                         "use_mixed_precision": LaunchConfiguration("use_mixed_precision"),
-                        "cuda_memory_log_period_sec": LaunchConfiguration(
-                            "cuda_memory_log_period_sec"
-                        ),
-                    }
-                ],
-            ),
-            Node(
-                condition=IfCondition(LaunchConfiguration("online_training_enabled")),
-                package="vision",
-                executable="vision_online_trainer",
-                name="vision_online_trainer",
-                output="screen",
-                parameters=[
-                    {
-                        "checkpoint_dir": LaunchConfiguration("checkpoint_dir"),
-                        "checkpoint_path": LaunchConfiguration("checkpoint_path"),
-                        "dataset_dir": LaunchConfiguration("dataset_dir"),
-                        "replay_dir": LaunchConfiguration("replay_dir"),
-                        "image_size": LaunchConfiguration("image_size"),
-                        "use_mixed_precision": LaunchConfiguration("use_mixed_precision"),
-                        "replay_buffer_capacity": LaunchConfiguration("replay_buffer_capacity"),
-                        "min_replay_size": LaunchConfiguration("min_replay_size"),
-                        "train_batch_size": LaunchConfiguration("train_batch_size"),
-                        "train_steps_per_tick": LaunchConfiguration("train_steps_per_tick"),
-                        "train_tick_period_sec": LaunchConfiguration("train_tick_period_sec"),
-                        "online_learning_rate": LaunchConfiguration("online_learning_rate"),
-                        "geometry_loss_weight": LaunchConfiguration("geometry_loss_weight"),
-                        "presence_loss_weight": LaunchConfiguration("presence_loss_weight"),
-                        "depth_loss_weight": LaunchConfiguration("depth_loss_weight"),
-                        "value_loss_weight": LaunchConfiguration("value_loss_weight"),
-                        "sample_prefetch_size": LaunchConfiguration("sample_prefetch_size"),
-                        "sample_loader_workers": LaunchConfiguration("sample_loader_workers"),
-                        "tensorboard_log_dir": LaunchConfiguration("tensorboard_log_dir"),
-                        "tensorboard_run_name": LaunchConfiguration("tensorboard_run_name"),
                         "cuda_memory_log_period_sec": LaunchConfiguration(
                             "cuda_memory_log_period_sec"
                         ),

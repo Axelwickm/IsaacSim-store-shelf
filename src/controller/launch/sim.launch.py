@@ -20,6 +20,7 @@ def _moveit_launch_path() -> str:
 def generate_launch_description() -> LaunchDescription:
     headless = LaunchConfiguration("headless")
     configuration = LaunchConfiguration("configuration")
+    store_demo_capture_training_data = LaunchConfiguration("store_demo_capture_training_data")
     use_moveit = LaunchConfiguration("use_moveit")
     planning_pipeline = LaunchConfiguration("planning_pipeline")
     use_moveit_rviz = LaunchConfiguration("use_moveit_rviz")
@@ -50,6 +51,11 @@ def generate_launch_description() -> LaunchDescription:
                 "configuration",
                 default_value="",
                 description="Named simulation configuration to load.",
+            ),
+            DeclareLaunchArgument(
+                "store_demo_capture_training_data",
+                default_value="false",
+                description="Whether store_demo should write Replicator supervised training frames.",
             ),
             DeclareLaunchArgument(
                 "use_moveit",
@@ -113,6 +119,7 @@ def generate_launch_description() -> LaunchDescription:
                     {
                         "headless": headless,
                         "configuration": configuration,
+                        "store_demo_capture_training_data": store_demo_capture_training_data,
                     }
                 ],
             ),

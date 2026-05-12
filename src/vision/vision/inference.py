@@ -5,8 +5,7 @@ import math
 import os
 import random
 import time
-from collections import OrderedDict, deque
-from datetime import datetime
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -35,17 +34,8 @@ from vision.model import (
     render_billboards,
 )
 
-try:
-    from torch.utils.tensorboard import SummaryWriter
-    _SUMMARY_WRITER_IMPORT_ERROR = None
-except Exception as error:  # pragma: no cover - optional runtime dependency
-    SummaryWriter = None
-    _SUMMARY_WRITER_IMPORT_ERROR = error
-
-
 DEFAULT_CHECKPOINT_DIR = Path("/workspace/checkpoints/vision")
-DEFAULT_TENSORBOARD_DIR = Path("/workspace/tensorboard/vision")
-DEFAULT_REPLAY_DIR = Path("/workspace/replay/vision")
+DEFAULT_REPLAY_DIR = Path("/workspace/replay")
 DEFAULT_CAMERA_TOPIC = "/camera/image_raw"
 DEFAULT_DEBUG_IMAGE_TOPIC = "/vision/debug_image"
 DEFAULT_CAMERA_INFO_TOPIC = "/camera/camera_info"
@@ -60,24 +50,10 @@ DEFAULT_CAMERA_FRAME_CONVENTION = "ros_optical"
 DEFAULT_QUERY_PRESENCE_THRESHOLD = 0.2
 DEFAULT_EXPLORATION_EPSILON = 0.10
 DEFAULT_LOG_EVERY = 30
-DEFAULT_REPLAY_BUFFER_CAPACITY = 8000
-DEFAULT_MIN_REPLAY_SIZE = 2
-DEFAULT_TRAIN_BATCH_SIZE = 16
-DEFAULT_TRAIN_STEPS_PER_TICK = 4
-DEFAULT_TRAIN_TICK_PERIOD = 0.01
-DEFAULT_LEARNING_RATE = 2e-4
-DEFAULT_GEOMETRY_LOSS_WEIGHT = 1.0
-DEFAULT_PRESENCE_LOSS_WEIGHT = 0.2
-DEFAULT_DEPTH_LOSS_WEIGHT = 0.2
-DEFAULT_CHECKPOINT_SAVE_INTERVAL = 100
 DEFAULT_PENDING_CANDIDATE_TIMEOUT = 30.0
 DEFAULT_MAX_INFLIGHT_CANDIDATES = 1
 DEFAULT_MAX_SUGGESTED_MARKERS = 32
 DEFAULT_CUDA_MEMORY_LOG_PERIOD = 30.0
-
-
-def _default_run_name() -> str:
-    return "vision-" + datetime.now().strftime("%Y%m%d-%H%M%S")
 
 
 def _encode_payload(payload: dict[str, Any]) -> String:
@@ -290,20 +266,9 @@ class VisionInferenceNode(Node):
         self.declare_parameter("image_size", DEFAULT_IMAGE_SIZE)
         self.declare_parameter("use_mixed_precision", True)
         self.declare_parameter("log_every", DEFAULT_LOG_EVERY)
-        self.declare_parameter("online_training_enabled", False)
-        self.declare_parameter("replay_buffer_capacity", DEFAULT_REPLAY_BUFFER_CAPACITY)
-        self.declare_parameter("min_replay_size", DEFAULT_MIN_REPLAY_SIZE)
-        self.declare_parameter("train_batch_size", DEFAULT_TRAIN_BATCH_SIZE)
-        self.declare_parameter("online_learning_rate", DEFAULT_LEARNING_RATE)
-        self.declare_parameter("geometry_loss_weight", DEFAULT_GEOMETRY_LOSS_WEIGHT)
-        self.declare_parameter("presence_loss_weight", DEFAULT_PRESENCE_LOSS_WEIGHT)
-        self.declare_parameter("depth_loss_weight", DEFAULT_DEPTH_LOSS_WEIGHT)
-        self.declare_parameter("freeze_backbone", True)
-        self.declare_parameter("tensorboard_log_dir", str(DEFAULT_TENSORBOARD_DIR))
-        self.declare_parameter("tensorboard_run_name", "")
+        self.declare_parameter("collect_training_data", False)
         self.declare_parameter("replay_dir", str(DEFAULT_REPLAY_DIR))
         self.declare_parameter("checkpoint_reload_period_sec", 5.0)
-        self.declare_parameter("checkpoint_save_interval", DEFAULT_CHECKPOINT_SAVE_INTERVAL)
         self.declare_parameter("pending_candidate_timeout_sec", DEFAULT_PENDING_CANDIDATE_TIMEOUT)
         self.declare_parameter("max_inflight_candidates", DEFAULT_MAX_INFLIGHT_CANDIDATES)
         self.declare_parameter("max_suggested_markers", DEFAULT_MAX_SUGGESTED_MARKERS)
@@ -339,40 +304,13 @@ class VisionInferenceNode(Node):
             self.get_parameter("use_mixed_precision").value
         )
         self._log_every = max(int(self.get_parameter("log_every").value), 1)
-        self._online_training_enabled = _parameter_bool(
-            self.get_parameter("online_training_enabled").value
+        self._collect_training_data = _parameter_bool(
+            self.get_parameter("collect_training_data").value
         )
-        self._replay_buffer_capacity = max(
-            int(self.get_parameter("replay_buffer_capacity").value),
-            1,
-        )
-        self._min_replay_size = max(int(self.get_parameter("min_replay_size").value), 1)
-        self._train_batch_size = max(int(self.get_parameter("train_batch_size").value), 1)
-        self._online_learning_rate = float(
-            self.get_parameter("online_learning_rate").value
-        )
-        self._geometry_loss_weight = float(
-            self.get_parameter("geometry_loss_weight").value
-        )
-        self._presence_loss_weight = float(
-            self.get_parameter("presence_loss_weight").value
-        )
-        self._depth_loss_weight = float(self.get_parameter("depth_loss_weight").value)
-        self._freeze_backbone = _parameter_bool(self.get_parameter("freeze_backbone").value)
-        self._tensorboard_log_dir = Path(
-            str(self.get_parameter("tensorboard_log_dir").value)
-        ).resolve()
-        self._tensorboard_run_name = str(
-            self.get_parameter("tensorboard_run_name").value
-        ).strip()
         self._replay_dir = Path(str(self.get_parameter("replay_dir").value)).resolve()
         self._checkpoint_reload_period_sec = max(
             float(self.get_parameter("checkpoint_reload_period_sec").value),
             0.5,
-        )
-        self._checkpoint_save_interval = max(
-            int(self.get_parameter("checkpoint_save_interval").value),
-            1,
         )
         self._pending_candidate_timeout_sec = max(
             float(self.get_parameter("pending_candidate_timeout_sec").value),
@@ -412,9 +350,6 @@ class VisionInferenceNode(Node):
             "billboard_rendering": "center_sampled_slots_size2p5_v6",
         }
 
-        self._optimizer: torch.optim.Optimizer | None = None
-        self._scaler = None
-
         checkpoint_metadata = {
             "epoch": 0,
             "global_step": 0,
@@ -439,13 +374,6 @@ class VisionInferenceNode(Node):
                 )
         self._model.eval()
         self._train_step = int(checkpoint_metadata["global_step"])
-        self._writer = None
-        checkpoint_run_name = str(
-            (checkpoint_metadata.get("metadata") or {}).get("tensorboard_run_name") or ""
-        ).strip()
-        if not self._tensorboard_run_name:
-            self._tensorboard_run_name = checkpoint_run_name or _default_run_name()
-        self._tensorboard_run_dir = self._tensorboard_log_dir / self._tensorboard_run_name
         self._last_checkpoint_mtime_ns = (
             checkpoint_path.stat().st_mtime_ns if checkpoint_path.exists() else 0
         )
@@ -491,7 +419,6 @@ class VisionInferenceNode(Node):
         self._frame_count = 0
         self._inference_time_sum = 0.0
         self._selection_serial = 0
-        self._replay_buffer: deque[dict[str, Any]] = deque(maxlen=self._replay_buffer_capacity)
         self._pending_candidates: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._seen_plan_outcomes: set[tuple[str, str, str]] = set()
         self._ground_truth_items: list[dict[str, Any]] = []
@@ -502,8 +429,7 @@ class VisionInferenceNode(Node):
             10,
         )
         self._outcome_count = 0
-        self._last_training_mode_log_monotonic = 0.0
-        self._last_replay_wait_log_size = 0
+        self._last_collection_mode_log_monotonic = 0.0
         self._checkpoint_reload_timer = self.create_timer(
             self._checkpoint_reload_period_sec,
             self._maybe_reload_checkpoint,
@@ -528,16 +454,14 @@ class VisionInferenceNode(Node):
                 f"has_scaler_state={bool(checkpoint_metadata.get('has_scaler_state'))}"
             )
             saved_metadata = checkpoint_metadata.get("metadata") or {}
-            saved_tensorboard_dir = saved_metadata.get("tensorboard_log_dir")
-            if saved_tensorboard_dir:
+            checkpoint_tensorboard_dir = saved_metadata.get("tensorboard_log_dir")
+            if checkpoint_tensorboard_dir:
                 self.get_logger().info(
                     "Checkpoint metadata: "
                     f"tensorboard_run_name={saved_metadata.get('tensorboard_run_name')}; "
-                    f"tensorboard_log_dir={saved_tensorboard_dir}; "
+                    f"tensorboard_log_dir={checkpoint_tensorboard_dir}; "
                     f"optimizer={saved_metadata.get('optimizer')}; "
-                    f"learning_rate={saved_metadata.get('learning_rate')}; "
-                    f"train_batch_size={saved_metadata.get('train_batch_size')}; "
-                    f"min_replay_size={saved_metadata.get('min_replay_size')}"
+                    f"learning_rate={saved_metadata.get('learning_rate')}"
                 )
             missing_keys = checkpoint_metadata.get("missing_keys") or []
             unexpected_keys = checkpoint_metadata.get("unexpected_keys") or []
@@ -561,20 +485,17 @@ class VisionInferenceNode(Node):
         )
         self.get_logger().info(
             "Vision mode: "
-            f"{'online-billboard-training' if self._online_training_enabled else 'billboard-inference-only'}; "
+            f"{'replay-collection' if self._collect_training_data else 'inference-only'}; "
             f"candidate topic={selected_candidate_topic}; "
             f"suggested markers topic={suggested_item_markers_topic}; "
             f"arm state topic={arm_state_topic}; "
-            f"reset topic={DEFAULT_RESET_TOPIC}"
+            f"reset topic={DEFAULT_RESET_TOPIC}; "
+            f"replay_dir={self._replay_dir}"
         )
         self.get_logger().info(
             "Vision mode details: "
             f"exploration_epsilon="
-            f"{self._exploration_epsilon if self._online_training_enabled else 0.0:.3f}; "
-            f"train_batch_size={self._train_batch_size}; "
-            f"geometry_loss_weight={self._geometry_loss_weight:.3f}; "
-            f"presence_loss_weight={self._presence_loss_weight:.3f}; "
-            f"depth_loss_weight={self._depth_loss_weight:.3f}; "
+            f"{self._exploration_epsilon if self._collect_training_data else 0.0:.3f}; "
             f"checkpoint_reload_period_sec={self._checkpoint_reload_period_sec:.1f}; "
             f"camera_frame_convention={self._camera_frame_convention}"
         )
@@ -651,40 +572,6 @@ class VisionInferenceNode(Node):
             )
         self._ground_truth_items = ground_truth_items
 
-    def _checkpoint_metadata(self) -> dict[str, Any]:
-        optimizer_groups = []
-        if self._optimizer is not None:
-            for group in self._optimizer.param_groups:
-                optimizer_groups.append(
-                    {
-                        "lr": float(group.get("lr", 0.0)),
-                        "weight_decay": float(group.get("weight_decay", 0.0)),
-                        "betas": list(group.get("betas", ())),
-                        "eps": float(group.get("eps", 0.0)),
-                    }
-                )
-        return {
-            "tensorboard_base_log_dir": str(self._tensorboard_log_dir),
-            "tensorboard_run_name": self._tensorboard_run_name,
-            "tensorboard_log_dir": str(self._tensorboard_run_dir),
-            "online_training_enabled": self._online_training_enabled,
-            "optimizer": type(self._optimizer).__name__ if self._optimizer is not None else None,
-            "optimizer_param_groups": optimizer_groups,
-            "scaler_enabled": bool(
-                self._scaler is not None and getattr(self._scaler, "is_enabled", lambda: False)()
-            ),
-            "freeze_backbone": self._freeze_backbone,
-            "learning_rate": self._online_learning_rate,
-            "replay_buffer_capacity": self._replay_buffer_capacity,
-            "min_replay_size": self._min_replay_size,
-            "train_batch_size": self._train_batch_size,
-            "geometry_loss_weight": self._geometry_loss_weight,
-            "presence_loss_weight": self._presence_loss_weight,
-            "depth_loss_weight": self._depth_loss_weight,
-            "checkpoint_save_interval": self._checkpoint_save_interval,
-            "exploration_epsilon": self._exploration_epsilon,
-        }
-
     def _write_replay_sample(self, replay_item: dict[str, Any], candidate_id: str, request_id: str) -> None:
         self._replay_dir.mkdir(parents=True, exist_ok=True)
         safe_id = "".join(
@@ -694,11 +581,26 @@ class VisionInferenceNode(Node):
         final_path = self._replay_dir / f"{safe_id}.npz"
         tmp_path = self._replay_dir / f"{safe_id}.tmp.npz"
         metadata = {key: value for key, value in replay_item.items() if key != "rgb"}
-        np.savez_compressed(
-            tmp_path,
-            rgb=replay_item["rgb"],
-            metadata_json=json.dumps(metadata, sort_keys=True),
-        )
+        try:
+            with open(tmp_path, "wb") as handle:
+                np.savez_compressed(
+                    handle,
+                    rgb=replay_item["rgb"],
+                    metadata_json=json.dumps(metadata, sort_keys=True),
+                )
+                handle.flush()
+                os.fsync(handle.fileno())
+            if tmp_path.stat().st_size <= 0:
+                raise RuntimeError(f"Temporary replay archive is empty: {tmp_path}")
+            with np.load(tmp_path, allow_pickle=False) as data:
+                _ = data["rgb"]
+                _ = data["metadata_json"]
+        except Exception:
+            try:
+                tmp_path.unlink()
+            except FileNotFoundError:
+                pass
+            raise
         tmp_path.replace(final_path)
 
     def _normalize_rgb_batch(self, rgb_batch: np.ndarray) -> torch.Tensor:
@@ -874,7 +776,7 @@ class VisionInferenceNode(Node):
         return self._frame_count == 0 or self._frame_count % self._log_every == 0
 
     def _should_log_projection_debug(self) -> bool:
-        return self._online_training_enabled or self._should_log_selection_debug()
+        return self._collect_training_data or self._should_log_selection_debug()
 
     def _render_query_alpha_mask(
         self,
@@ -1098,7 +1000,7 @@ class VisionInferenceNode(Node):
             return {"selected_query_index": None, "selected_mask": None}
 
         effective_epsilon = (
-            self._exploration_epsilon if self._online_training_enabled else 0.0
+            self._exploration_epsilon if self._collect_training_data else 0.0
         )
         explored = random.random() < effective_epsilon
         if explored:
@@ -1176,12 +1078,6 @@ class VisionInferenceNode(Node):
             )
             candidate_payload["reprojected_model_uv"] = reprojected_model_uv
             candidate_payload["reprojection_error_px"] = float(reprojection_error_px)
-            if self._writer is not None:
-                self._writer.add_scalar(
-                    "projection/reprojection_error_px",
-                    float(reprojection_error_px),
-                    self._frame_count,
-                )
         self._selected_candidate_publisher.publish(_encode_payload(candidate_payload))
         self._pending_candidates[candidate_id] = {
             "candidate_id": candidate_id,
@@ -1199,12 +1095,6 @@ class VisionInferenceNode(Node):
             "gt_targets": gt_targets,
             "rgb": np.ascontiguousarray(resized_rgb.copy()),
         }
-        if self._writer is not None:
-            self._writer.add_scalar("selection/presence", selected_score, self._frame_count)
-            self._writer.add_scalar("selection/selected_value", selected_value, self._frame_count)
-            self._writer.add_scalar("selection/value_left", value_left, self._frame_count)
-            self._writer.add_scalar("selection/value_right", value_right, self._frame_count)
-            self._writer.add_scalar("selection/explored", 1.0 if explored else 0.0, self._frame_count)
         if self._should_log_projection_debug():
             reprojected_text = (
                 "none"
@@ -1264,6 +1154,8 @@ class VisionInferenceNode(Node):
         pending = self._pending_candidates.pop(candidate_id, None)
         if pending is None:
             return
+        if not self._collect_training_data:
+            return
 
         success = 1.0 if bool(plan_outcome.get("success")) else 0.0
         outcome_arm_side = str(plan_outcome.get("arm_side") or pending["arm_side"]).strip()
@@ -1312,27 +1204,7 @@ class VisionInferenceNode(Node):
             f"world_point={pending.get('world_point')}"
         )
 
-        if self._writer is not None:
-            step = self._outcome_count
-            self._writer.add_scalar("planner/approach_pregrasp_success", success, step)
-            self._writer.add_scalar(
-                f"planner/approach_pregrasp_success_{outcome_arm_side}",
-                success,
-                step,
-            )
-            self._writer.add_scalar(
-                "planner/approach_pregrasp_planning_time",
-                replay_item["planning_time"],
-                step,
-            )
-            self._writer.add_scalar(
-                "replay/buffer_size",
-                len(self._replay_buffer),
-                step,
-            )
-            self._writer.flush()
-
-        self._log_training_mode_periodically()
+        self._log_collection_mode_periodically()
 
     def _handle_reset(self, message: String) -> None:
         payload = _decode_payload(message)
@@ -1349,21 +1221,22 @@ class VisionInferenceNode(Node):
             + f"; cleared_pending={pending_count}; cleared_seen_outcomes={outcome_count}"
         )
 
-    def _log_training_mode_periodically(self) -> None:
-        if not self._online_training_enabled:
+    def _log_collection_mode_periodically(self) -> None:
+        if not self._collect_training_data:
             return
         now = time.monotonic()
         if (
-            self._last_training_mode_log_monotonic != 0.0
-            and now - self._last_training_mode_log_monotonic < 30.0
+            self._last_collection_mode_log_monotonic != 0.0
+            and now - self._last_collection_mode_log_monotonic < 30.0
         ):
             return
-        self._last_training_mode_log_monotonic = now
+        self._last_collection_mode_log_monotonic = now
         self.get_logger().info(
-            "Vision mode: online-billboard-inference; "
+            "Vision mode: replay-collection; "
             f"pending_candidates={len(self._pending_candidates)}; "
             f"checkpoint_step={self._train_step}; "
-            f"checkpoint_reload_period_sec={self._checkpoint_reload_period_sec:.1f}"
+            f"checkpoint_reload_period_sec={self._checkpoint_reload_period_sec:.1f}; "
+            f"replay_dir={self._replay_dir}"
         )
 
     def _handle_image(self, message: Image) -> None:
@@ -1430,13 +1303,7 @@ class VisionInferenceNode(Node):
                 f"debug_size={debug_overlay.shape[1]}x{debug_overlay.shape[0]}; "
                 f"avg_inference_ms={average_ms:.1f}"
             )
-        if self._writer is not None:
-            self._writer.add_scalar("inference/frame_time_sec", inference_elapsed, self._frame_count)
-
     def destroy_node(self) -> bool:
-        if self._writer is not None:
-            self._writer.flush()
-            self._writer.close()
         return super().destroy_node()
 
 

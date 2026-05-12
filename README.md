@@ -23,14 +23,14 @@ I built it to learn the modern Isaac Sim and ROS 2 manipulation stack, push cuMo
   - Uses **Isaac Sim**, **USD**, **PhysX**, and the **Isaac Sim ROS 2 bridge** to construct and run the shelf scene.
   - `manager.py` exposes a ROS control interface on `/isaacsim_manager/control` and supports `start`, `start_headless`, `stop`, and `restart`.
   - `scene_construction.py` loads the shelf USD, imports the YuMi **URDF**, adds camera frames, TF graphs, ROS camera output, static colliders, item semantics, and drop-off targets.
-  - `image_collection.py` defines the `collect_vision_data`, `static`, and `store_demo` scenarios.
-  - Uses **Omniverse Replicator** to capture RGB, instance segmentation, distance-to-camera, and per-frame metadata for vision training.
+  - `image_collection.py` defines the `static` and `store_demo` scenarios used by the top-level launches.
+  - Publishes ground-truth item centers and reset events used by vision replay collection.
   - `trajectory_executor.py` implements direct **FollowJointTrajectory** action servers that apply planned joint trajectories to Isaac Sim articulations.
   - `vision_panel.py` adds an in-simulation debug view for the model output.
 
 - `src/vision`
   - Uses **PyTorch**, **torchvision**, **OpenCV**, and **ROS 2 image topics** for training and inference.
-  - Input is camera RGB from `/camera/image_raw` plus `/camera/camera_info`; training data comes from Replicator RGB, instance segmentation, distance-to-camera, and metadata files.
+  - Input is camera RGB from `/camera/image_raw` plus `/camera/camera_info`; training data is supervised Replicator samples plus optional planner feedback written to `/workspace/replay` when collection is enabled.
   - Output includes `/vision/debug_image`, `/vision/selected_candidate`, `/vision/suggested_item_markers`, and `/vision/ground_truth_items`.
   - The model is a custom **query-based depth and identity predictor**.
   - The backbone is **MobileNetV3 Small** feature extraction followed by a 1x1 projection, learned object queries, a **Transformer decoder**, slot heads, and small alpha-mask patch decoders.
@@ -56,7 +56,7 @@ I built it to learn the modern Isaac Sim and ROS 2 manipulation stack, push cuMo
 - `src/controller`
   - Provides top-level **ROS 2 launch orchestration**.
   - `store_demo.launch.py` starts the Isaac Sim scenario, vision inference, motion coordinator/planners, MoveIt, ros2_control, and optional RViz.
-  - `collect_vision_data.launch.py` starts the synthetic data capture scenario.
+  - `train_vision.launch.py` starts vision training separately against collected replay data.
   - `static.launch.py` starts a lighter static visualization/debug setup.
 
 ## How to run
@@ -114,15 +114,17 @@ ros2 launch controller store_demo.launch.py \
   use_moveit_rviz:=true
 ```
 
-Run the store demo with online vision training and RViz enabled:
+Collect replay data for later vision training:
 
 ```bash
 ros2 launch controller store_demo.launch.py \
   motion_pipeline_id:=isaac_ros_cumotion \
   motion_planner_id:=cuMotion \
-  vision_online_training_enabled:=true \
-  use_moveit_rviz:=true
+  vision_collect_training_data:=true
 ```
+
+Supervised Replicator perception samples and optional planner feedback replay
+samples are written to `/workspace/replay` when `vision_collect_training_data:=true`.
 
 Start the simulation in headless mode through the lower-level launch path:
 
@@ -134,16 +136,16 @@ ros2 launch controller sim.launch.py \
   planning_pipeline:=isaac_ros_cumotion
 ```
 
-Collect synthetic vision training data:
-
-```bash
-ros2 launch controller collect_vision_data.launch.py headless:=true
-```
-
-Train the vision model:
+Train the vision model after collection:
 
 ```bash
 ros2 launch controller train_vision.launch.py
+```
+
+On the host, watch training and held-out test metrics in TensorBoard:
+
+```bash
+tensorboard --logdir tensorboard/vision --bind_all
 ```
 
 Run vision inference only:

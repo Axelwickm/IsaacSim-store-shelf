@@ -18,14 +18,9 @@ def generate_launch_description() -> LaunchDescription:
                 description="Optional explicit checkpoint path to load before training.",
             ),
             DeclareLaunchArgument(
-                "dataset_dir",
-                default_value="/workspace/collect_vision_data_output",
-                description="Collected Replicator dataset directory.",
-            ),
-            DeclareLaunchArgument(
                 "replay_dir",
-                default_value="/workspace/replay/vision",
-                description="Planner feedback replay directory.",
+                default_value="/workspace/replay",
+                description="Replay directory containing supervised samples and optional planner feedback.",
             ),
             DeclareLaunchArgument(
                 "image_size",
@@ -48,6 +43,21 @@ def generate_launch_description() -> LaunchDescription:
                 description="Training batch size.",
             ),
             DeclareLaunchArgument(
+                "train_split_threshold",
+                default_value="0.75",
+                description="MD5 filename split threshold used for train samples.",
+            ),
+            DeclareLaunchArgument(
+                "eval_interval_steps",
+                default_value="2000",
+                description="Optimizer steps between held-out test evaluations; 0 disables.",
+            ),
+            DeclareLaunchArgument(
+                "eval_batch_size",
+                default_value="2",
+                description="Held-out test evaluation batch size.",
+            ),
+            DeclareLaunchArgument(
                 "train_steps_per_tick",
                 default_value="1",
                 description="Optimizer steps per timer tick.",
@@ -58,9 +68,9 @@ def generate_launch_description() -> LaunchDescription:
                 description="Seconds between optimizer timer ticks.",
             ),
             DeclareLaunchArgument(
-                "online_learning_rate",
+                "learning_rate",
                 default_value="2e-4",
-                description="Learning rate for standalone online training.",
+                description="Learning rate for training.",
             ),
             DeclareLaunchArgument(
                 "geometry_loss_weight",
@@ -105,17 +115,17 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument(
                 "replay_scan_period_sec",
                 default_value="1.0",
-                description="Seconds between dataset/replay directory scans.",
+                description="Seconds between replay directory scans.",
             ),
             DeclareLaunchArgument(
                 "sample_prefetch_size",
                 default_value="64",
-                description="Number of decoded Replicator samples to keep ready for training.",
+                description="Number of decoded samples to keep ready for training.",
             ),
             DeclareLaunchArgument(
                 "sample_loader_workers",
                 default_value="2",
-                description="Background workers used to decode Replicator samples.",
+                description="Background workers used to decode samples.",
             ),
             DeclareLaunchArgument(
                 "training_debug_period_steps",
@@ -136,15 +146,17 @@ def generate_launch_description() -> LaunchDescription:
                     {
                         "checkpoint_dir": LaunchConfiguration("checkpoint_dir"),
                         "checkpoint_path": LaunchConfiguration("checkpoint_path"),
-                        "dataset_dir": LaunchConfiguration("dataset_dir"),
                         "replay_dir": LaunchConfiguration("replay_dir"),
                         "image_size": LaunchConfiguration("image_size"),
                         "replay_buffer_capacity": LaunchConfiguration("replay_buffer_capacity"),
                         "min_replay_size": LaunchConfiguration("min_replay_size"),
                         "train_batch_size": LaunchConfiguration("train_batch_size"),
+                        "train_split_threshold": LaunchConfiguration("train_split_threshold"),
+                        "eval_interval_steps": LaunchConfiguration("eval_interval_steps"),
+                        "eval_batch_size": LaunchConfiguration("eval_batch_size"),
                         "train_steps_per_tick": LaunchConfiguration("train_steps_per_tick"),
                         "train_tick_period_sec": LaunchConfiguration("train_tick_period_sec"),
-                        "online_learning_rate": LaunchConfiguration("online_learning_rate"),
+                        "learning_rate": LaunchConfiguration("learning_rate"),
                         "geometry_loss_weight": LaunchConfiguration("geometry_loss_weight"),
                         "presence_loss_weight": LaunchConfiguration("presence_loss_weight"),
                         "depth_loss_weight": LaunchConfiguration("depth_loss_weight"),

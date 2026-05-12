@@ -17,21 +17,16 @@ import torch
 import torch.nn.functional as F
 
 from vision.checkpoints import load_checkpoint, save_checkpoint
-from vision.dataset import RGB_MEAN, RGB_STD, StoreShelfVisionDataset
+from vision.dataset import (
+    RGB_MEAN,
+    RGB_STD,
+    TRAIN_SPLIT_THRESHOLD,
+    StoreShelfVisionDataset,
+    stable_sample_split,
+)
 from vision.inference import (
     DEFAULT_CHECKPOINT_DIR,
-    DEFAULT_CHECKPOINT_SAVE_INTERVAL,
-    DEFAULT_DEPTH_LOSS_WEIGHT,
-    DEFAULT_GEOMETRY_LOSS_WEIGHT,
-    DEFAULT_LEARNING_RATE,
-    DEFAULT_MIN_REPLAY_SIZE,
-    DEFAULT_PRESENCE_LOSS_WEIGHT,
     DEFAULT_REPLAY_DIR,
-    DEFAULT_REPLAY_BUFFER_CAPACITY,
-    DEFAULT_TENSORBOARD_DIR,
-    DEFAULT_TRAIN_BATCH_SIZE,
-    DEFAULT_TRAIN_STEPS_PER_TICK,
-    DEFAULT_TRAIN_TICK_PERIOD,
     _parameter_bool,
 )
 from vision.model import (
@@ -54,12 +49,23 @@ except Exception as error:  # pragma: no cover - optional runtime dependency
     _SUMMARY_WRITER_IMPORT_ERROR = error
 
 
-DEFAULT_DATASET_DIR = Path("/workspace/collect_vision_data_output")
 DEFAULT_CUDA_MEMORY_LOG_PERIOD = 30.0
+DEFAULT_CHECKPOINT_SAVE_INTERVAL = 100
+DEFAULT_DEPTH_LOSS_WEIGHT = 0.2
+DEFAULT_GEOMETRY_LOSS_WEIGHT = 1.0
+DEFAULT_LEARNING_RATE = 2e-4
+DEFAULT_MIN_REPLAY_SIZE = 2
+DEFAULT_PRESENCE_LOSS_WEIGHT = 0.2
+DEFAULT_REPLAY_BUFFER_CAPACITY = 512
+DEFAULT_TENSORBOARD_DIR = Path("/workspace/tensorboard/vision")
+DEFAULT_TRAIN_BATCH_SIZE = 2
+DEFAULT_TRAIN_STEPS_PER_TICK = 1
+DEFAULT_TRAIN_TICK_PERIOD = 0.05
 DEFAULT_VALUE_LOSS_WEIGHT = 1.0
 DEFAULT_TRAINING_DEBUG_PERIOD_STEPS = 25
 DEFAULT_SAMPLE_PREFETCH_SIZE = 64
 DEFAULT_SAMPLE_LOADER_WORKERS = 2
+DEFAULT_EVAL_INTERVAL_STEPS = 2000
 
 
 def _bytes_to_mib(byte_count: int | float) -> float:
@@ -226,13 +232,13 @@ def _sample_cpu_bytes(sample: dict[str, Any]) -> int:
     return total
 
 
-def _sample_file_signature(dataset_dir: Path, sample_id: str) -> int | None:
+def _sample_file_signature(sample_dir: Path, sample_id: str) -> int | None:
     paths = [
-        dataset_dir / f"rgb_{sample_id}.png",
-        dataset_dir / f"instance_segmentation_{sample_id}.png",
-        dataset_dir / f"distance_to_camera_{sample_id}.npy",
-        dataset_dir / f"instance_segmentation_mapping_{sample_id}.json",
-        dataset_dir / f"instance_segmentation_semantics_mapping_{sample_id}.json",
+        sample_dir / f"rgb_{sample_id}.png",
+        sample_dir / f"instance_segmentation_{sample_id}.png",
+        sample_dir / f"distance_to_camera_{sample_id}.npy",
+        sample_dir / f"instance_segmentation_mapping_{sample_id}.json",
+        sample_dir / f"instance_segmentation_semantics_mapping_{sample_id}.json",
     ]
     try:
         return max(path.stat().st_mtime_ns for path in paths)
@@ -399,16 +405,18 @@ class VisionOnlineTrainerNode(Node):
         super().__init__("vision_online_trainer")
         self.declare_parameter("checkpoint_dir", str(DEFAULT_CHECKPOINT_DIR))
         self.declare_parameter("checkpoint_path", "")
-        self.declare_parameter("dataset_dir", str(DEFAULT_DATASET_DIR))
         self.declare_parameter("replay_dir", str(DEFAULT_REPLAY_DIR))
         self.declare_parameter("image_size", 384)
         self.declare_parameter("use_mixed_precision", True)
         self.declare_parameter("replay_buffer_capacity", DEFAULT_REPLAY_BUFFER_CAPACITY)
         self.declare_parameter("min_replay_size", DEFAULT_MIN_REPLAY_SIZE)
         self.declare_parameter("train_batch_size", min(DEFAULT_TRAIN_BATCH_SIZE, 2))
+        self.declare_parameter("train_split_threshold", TRAIN_SPLIT_THRESHOLD)
+        self.declare_parameter("eval_interval_steps", DEFAULT_EVAL_INTERVAL_STEPS)
+        self.declare_parameter("eval_batch_size", min(DEFAULT_TRAIN_BATCH_SIZE, 2))
         self.declare_parameter("train_steps_per_tick", DEFAULT_TRAIN_STEPS_PER_TICK)
         self.declare_parameter("train_tick_period_sec", DEFAULT_TRAIN_TICK_PERIOD)
-        self.declare_parameter("online_learning_rate", DEFAULT_LEARNING_RATE)
+        self.declare_parameter("learning_rate", DEFAULT_LEARNING_RATE)
         self.declare_parameter("geometry_loss_weight", DEFAULT_GEOMETRY_LOSS_WEIGHT)
         self.declare_parameter("presence_loss_weight", DEFAULT_PRESENCE_LOSS_WEIGHT)
         self.declare_parameter("depth_loss_weight", DEFAULT_DEPTH_LOSS_WEIGHT)
@@ -431,7 +439,6 @@ class VisionOnlineTrainerNode(Node):
             if checkpoint_path_value
             else self._latest_checkpoint_path
         )
-        self._dataset_dir = Path(str(self.get_parameter("dataset_dir").value)).resolve()
         self._replay_dir = Path(str(self.get_parameter("replay_dir").value)).resolve()
         self._image_size = int(self.get_parameter("image_size").value)
         self._use_mixed_precision = _parameter_bool(
@@ -443,6 +450,15 @@ class VisionOnlineTrainerNode(Node):
         )
         self._min_sample_size = max(int(self.get_parameter("min_replay_size").value), 1)
         self._train_batch_size = max(int(self.get_parameter("train_batch_size").value), 1)
+        self._train_split_threshold = min(
+            max(float(self.get_parameter("train_split_threshold").value), 0.0),
+            1.0,
+        )
+        self._eval_interval_steps = max(
+            int(self.get_parameter("eval_interval_steps").value),
+            0,
+        )
+        self._eval_batch_size = max(int(self.get_parameter("eval_batch_size").value), 1)
         self._train_steps_per_tick = max(
             int(self.get_parameter("train_steps_per_tick").value),
             1,
@@ -451,9 +467,7 @@ class VisionOnlineTrainerNode(Node):
             float(self.get_parameter("train_tick_period_sec").value),
             0.001,
         )
-        self._online_learning_rate = float(
-            self.get_parameter("online_learning_rate").value
-        )
+        self._learning_rate = float(self.get_parameter("learning_rate").value)
         self._identity_loss_weight = float(
             self.get_parameter("geometry_loss_weight").value
         )
@@ -525,7 +539,7 @@ class VisionOnlineTrainerNode(Node):
         ]
         self._optimizer = torch.optim.AdamW(
             trainable_parameters,
-            lr=self._online_learning_rate,
+            lr=self._learning_rate,
         )
         self._scaler = torch.amp.GradScaler(
             "cuda",
@@ -548,12 +562,15 @@ class VisionOnlineTrainerNode(Node):
         self._model.train()
         self._train_step = int(checkpoint_metadata["global_step"])
         self._dataset = StoreShelfVisionDataset(
-            self._dataset_dir,
+            self._replay_dir,
             split="all",
             image_size=self._image_size,
             allow_empty=True,
         )
         self._sample_ids: list[str] = []
+        self._train_sample_ids: list[str] = []
+        self._test_sample_ids: list[str] = []
+        self._sample_splits: dict[str, str] = {}
         self._sample_signatures: dict[str, int] = {}
         self._sample_cache: OrderedDict[str, dict[str, Any]] = OrderedDict()
         self._sample_futures: dict[str, Future] = {}
@@ -566,9 +583,13 @@ class VisionOnlineTrainerNode(Node):
             else None
         )
         self._feedback_buffer: deque[dict[str, Any]] = deque(maxlen=self._sample_buffer_capacity)
+        self._test_feedback_buffer: deque[dict[str, Any]] = deque(
+            maxlen=self._sample_buffer_capacity
+        )
         self._loaded_feedback_signatures: dict[str, int] = {}
         self._sample_buffer_cpu_bytes = 0
         self._feedback_buffer_cpu_bytes = 0
+        self._test_feedback_buffer_cpu_bytes = 0
         self._last_batch_gpu_bytes = 0
         self._writer = SummaryWriter(log_dir=str(self._tensorboard_run_dir))
         self._last_wait_log_size = -1
@@ -592,14 +613,19 @@ class VisionOnlineTrainerNode(Node):
         self._scan_training_inputs()
 
         self.get_logger().info(
-            "Vision online trainer ready "
-            f"(pid={os.getpid()}, dataset_dir={self._dataset_dir}, "
-            f"replay_dir={self._replay_dir}, "
+            "Vision trainer ready "
+            f"(pid={os.getpid()}, replay_dir={self._replay_dir}, "
             f"checkpoint={self._latest_checkpoint_path}, device={self._device}, "
             f"sample_capacity={self._sample_buffer_capacity}, "
+            f"train_samples={len(self._train_sample_ids)}, "
+            f"test_samples={len(self._test_sample_ids)}, "
+            f"train_feedback={len(self._feedback_buffer)}, "
+            f"test_feedback={len(self._test_feedback_buffer)}, "
+            f"train_split_threshold={self._train_split_threshold:.3f}, "
             f"sample_prefetch={self._sample_prefetch_size}, "
             f"sample_loader_workers={self._sample_loader_workers}, "
             f"batch_size={self._train_batch_size}, steps_per_tick={self._train_steps_per_tick}, "
+            f"eval_interval_steps={self._eval_interval_steps}, "
             f"value_loss_weight={self._value_loss_weight:.3f}, "
             f"training_debug_period_steps={self._training_debug_period_steps})"
         )
@@ -610,7 +636,7 @@ class VisionOnlineTrainerNode(Node):
             return
         device = self._device
         self.get_logger().info(
-            "Vision online trainer CUDA memory: "
+            "Vision trainer CUDA memory: "
             f"pid={os.getpid()}; "
             f"allocated={_bytes_to_mib(torch.cuda.memory_allocated(device)):.1f}MiB; "
             f"reserved={_bytes_to_mib(torch.cuda.memory_reserved(device)):.1f}MiB; "
@@ -620,37 +646,53 @@ class VisionOnlineTrainerNode(Node):
             f"samples={len(self._sample_cache)}/{len(self._sample_ids)}; "
             f"sample_loads_inflight={len(self._sample_futures)}; "
             f"feedback_buffer_cpu={_bytes_to_mib(self._feedback_buffer_cpu_bytes):.1f}MiB; "
-            f"feedback={len(self._feedback_buffer)}"
+            f"feedback={len(self._feedback_buffer)}; "
+            f"test_feedback_buffer_cpu={_bytes_to_mib(self._test_feedback_buffer_cpu_bytes):.1f}MiB; "
+            f"test_feedback={len(self._test_feedback_buffer)}"
         )
 
     def _scan_training_inputs(self) -> None:
-        self._scan_dataset_dir()
+        self._scan_sample_files()
         self._scan_feedback_dir()
         self._harvest_sample_futures()
         self._schedule_sample_prefetch()
 
-    def _scan_dataset_dir(self) -> None:
-        if not self._dataset_dir.exists():
+    def _scan_sample_files(self) -> None:
+        if not self._replay_dir.exists():
             return
         indexed_count = 0
-        for path in sorted(self._dataset_dir.glob("rgb_*.png")):
+        for path in sorted(self._replay_dir.glob("rgb_*.png")):
             sample_id = path.stem.split("_")[-1]
-            signature = _sample_file_signature(self._dataset_dir, sample_id)
+            signature = _sample_file_signature(self._replay_dir, sample_id)
             if signature is None:
                 continue
             if self._sample_signatures.get(sample_id) == signature:
                 continue
             self._sample_signatures[sample_id] = signature
+            sample_split = stable_sample_split(path.name, self._train_split_threshold)
+            previous_split = self._sample_splits.get(sample_id)
+            if previous_split and previous_split != sample_split:
+                if previous_split == "train" and sample_id in self._train_sample_ids:
+                    self._train_sample_ids.remove(sample_id)
+                if previous_split == "test" and sample_id in self._test_sample_ids:
+                    self._test_sample_ids.remove(sample_id)
+            self._sample_splits[sample_id] = sample_split
             if sample_id in self._sample_cache:
                 removed = self._sample_cache.pop(sample_id)
                 self._sample_buffer_cpu_bytes -= _sample_cpu_bytes(removed)
             if sample_id not in self._sample_ids:
                 self._sample_ids.append(sample_id)
+            if sample_split == "train" and sample_id not in self._train_sample_ids:
+                self._train_sample_ids.append(sample_id)
+            if sample_split == "test" and sample_id not in self._test_sample_ids:
+                self._test_sample_ids.append(sample_id)
             indexed_count += 1
         if indexed_count:
             self.get_logger().info(
-                f"Indexed {indexed_count} new/updated Replicator samples; "
+                f"Indexed {indexed_count} new/updated samples; "
                 f"sample_index={len(self._sample_ids)}; "
+                f"train={len(self._train_sample_ids)}; "
+                f"test={len(self._test_sample_ids)}; "
                 f"sample_cache={len(self._sample_cache)}/{self._sample_buffer_capacity}; "
                 f"sample_cache_cpu={_bytes_to_mib(self._sample_buffer_cpu_bytes):.1f}MiB"
             )
@@ -698,23 +740,33 @@ class VisionOnlineTrainerNode(Node):
             loaded_count += 1
         if loaded_count:
             self.get_logger().info(
-                f"Prefetched {loaded_count} Replicator samples; "
+                f"Prefetched {loaded_count} samples; "
                 f"sample_cache={len(self._sample_cache)}/{self._sample_buffer_capacity}; "
                 f"sample_cache_cpu={_bytes_to_mib(self._sample_buffer_cpu_bytes):.1f}MiB"
             )
 
     def _schedule_sample_prefetch(self) -> None:
-        if not self._sample_ids:
+        if not self._train_sample_ids:
             return
         target_cache_size = min(
             self._sample_prefetch_size,
             self._sample_buffer_capacity,
-            len(self._sample_ids),
+            len(self._train_sample_ids),
         )
-        wanted = max(target_cache_size - len(self._sample_cache) - len(self._sample_futures), 0)
+        train_cached_count = sum(
+            1
+            for sample_id in self._sample_cache.keys()
+            if self._sample_splits.get(sample_id) == "train"
+        )
+        train_future_count = sum(
+            1
+            for sample_id in self._sample_futures.keys()
+            if self._sample_splits.get(sample_id) == "train"
+        )
+        wanted = max(target_cache_size - train_cached_count - train_future_count, 0)
         if wanted <= 0:
             return
-        shuffled_ids = list(self._sample_ids)
+        shuffled_ids = list(self._train_sample_ids)
         random.shuffle(shuffled_ids)
         for sample_id in shuffled_ids:
             if wanted <= 0:
@@ -783,6 +835,8 @@ class VisionOnlineTrainerNode(Node):
         if not self._replay_dir.exists():
             return
         loaded_count = 0
+        train_loaded_count = 0
+        test_loaded_count = 0
         for path in sorted(self._replay_dir.glob("*.npz")):
             if path.name.endswith(".tmp.npz"):
                 continue
@@ -794,46 +848,78 @@ class VisionOnlineTrainerNode(Node):
                 continue
             sample = self._load_feedback_sample(path)
             if sample is None:
+                self._loaded_feedback_signatures[path_key] = signature
                 continue
-            if len(self._feedback_buffer) == self._feedback_buffer.maxlen:
-                evicted = self._feedback_buffer[0]
-                self._feedback_buffer_cpu_bytes -= _sample_cpu_bytes(evicted)
-            self._feedback_buffer.append(sample)
-            self._feedback_buffer_cpu_bytes += _sample_cpu_bytes(sample)
+            sample_split = stable_sample_split(path.name, self._train_split_threshold)
+            sample["split"] = sample_split
+            sample_cpu_bytes = _sample_cpu_bytes(sample)
+            if sample_split == "train":
+                if len(self._feedback_buffer) == self._feedback_buffer.maxlen:
+                    evicted = self._feedback_buffer[0]
+                    self._feedback_buffer_cpu_bytes -= _sample_cpu_bytes(evicted)
+                self._feedback_buffer.append(sample)
+                self._feedback_buffer_cpu_bytes += sample_cpu_bytes
+                train_loaded_count += 1
+            else:
+                if len(self._test_feedback_buffer) == self._test_feedback_buffer.maxlen:
+                    evicted = self._test_feedback_buffer[0]
+                    self._test_feedback_buffer_cpu_bytes -= _sample_cpu_bytes(evicted)
+                self._test_feedback_buffer.append(sample)
+                self._test_feedback_buffer_cpu_bytes += sample_cpu_bytes
+                test_loaded_count += 1
             self._loaded_feedback_signatures[path_key] = signature
             loaded_count += 1
         if loaded_count:
             self.get_logger().info(
                 f"Loaded {loaded_count} new/updated value feedback samples; "
-                f"feedback_size={len(self._feedback_buffer)}/{self._sample_buffer_capacity}; "
-                f"feedback_buffer_cpu={_bytes_to_mib(self._feedback_buffer_cpu_bytes):.1f}MiB"
+                f"train_feedback={len(self._feedback_buffer)}/{self._sample_buffer_capacity} "
+                f"(+{train_loaded_count}); "
+                f"test_feedback={len(self._test_feedback_buffer)}/{self._sample_buffer_capacity} "
+                f"(+{test_loaded_count}); "
+                f"feedback_buffer_cpu={_bytes_to_mib(self._feedback_buffer_cpu_bytes):.1f}MiB; "
+                f"test_feedback_buffer_cpu={_bytes_to_mib(self._test_feedback_buffer_cpu_bytes):.1f}MiB"
             )
 
     def _handle_training_tick(self) -> None:
         self._harvest_sample_futures()
         self._schedule_sample_prefetch()
-        if len(self._sample_ids) < self._min_sample_size:
-            if len(self._sample_ids) != self._last_wait_log_size:
-                self._last_wait_log_size = len(self._sample_ids)
+        has_supervised_samples = len(self._train_sample_ids) >= self._min_sample_size
+        if not has_supervised_samples:
+            wait_log_size = (len(self._train_sample_ids), len(self._feedback_buffer))
+            if wait_log_size != self._last_wait_log_size:
+                self._last_wait_log_size = wait_log_size
                 self.get_logger().info(
-                    "Online trainer waiting for Replicator samples: "
-                    f"sample_index={len(self._sample_ids)}/{self._min_sample_size}; "
+                    "Trainer waiting for supervised samples: "
+                    f"replay_dir={self._replay_dir}; "
+                    f"train_samples={len(self._train_sample_ids)}/{self._min_sample_size}; "
+                    f"test_samples={len(self._test_sample_ids)}; "
+                    f"train_feedback={len(self._feedback_buffer)}; "
+                    f"test_feedback={len(self._test_feedback_buffer)}; "
                     f"sample_cache={len(self._sample_cache)}; "
                     f"inflight={len(self._sample_futures)}"
                 )
             return
         for _ in range(self._train_steps_per_tick):
             metrics = self._run_one_train_step()
+        if (
+            self._eval_interval_steps > 0
+            and self._train_step % self._eval_interval_steps < self._train_steps_per_tick
+        ):
+            self._run_test_evaluation()
         self._writer.flush()
         if self._train_step % max(self._checkpoint_save_interval, 1) < self._train_steps_per_tick:
             self.get_logger().info(
                 "Online trainer step: "
                 f"train_step={self._train_step}; "
-                f"sample_index={len(self._sample_ids)}; "
+                f"train_samples={len(self._train_sample_ids)}; "
+                f"test_samples={len(self._test_sample_ids)}; "
+                f"train_feedback={len(self._feedback_buffer)}; "
+                f"test_feedback={len(self._test_feedback_buffer)}; "
                 f"sample_cache={len(self._sample_cache)}; "
                 f"loss={metrics['loss']:.6f}; "
                 f"identity={metrics['identity_loss']:.6f}; "
                 f"value={metrics['value_loss']:.6f}; "
+                f"value_acc={metrics['value_accuracy']:.3f}; "
                 f"feedback_batch={int(metrics['feedback_batch_size'])}; "
                 f"depth={metrics['depth_loss']:.6f}; "
                 f"gt_ids={metrics['debug/first_target_ids']:.0f}; "
@@ -851,20 +937,26 @@ class VisionOnlineTrainerNode(Node):
 
     def _run_one_train_step(self) -> dict[str, float]:
         batch = self._sample_training_batch()
-        pixel_values = torch.stack(
-            [sample["rgb_normalized"] for sample in batch],
-        ).to(self._device)
-        identity_targets = torch.stack(
-            [sample["instance_segmentation"] for sample in batch],
-        ).to(self._device)
-        depth_targets = torch.stack(
-            [sample["distance_to_camera"] for sample in batch],
-        ).to(self._device)
-        self._last_batch_gpu_bytes = (
-            _tensor_bytes(pixel_values)
-            + _tensor_bytes(identity_targets)
-            + _tensor_bytes(depth_targets)
-        )
+        if batch:
+            pixel_values = torch.stack(
+                [sample["rgb_normalized"] for sample in batch],
+            ).to(self._device)
+            identity_targets = torch.stack(
+                [sample["instance_segmentation"] for sample in batch],
+            ).to(self._device)
+            depth_targets = torch.stack(
+                [sample["distance_to_camera"] for sample in batch],
+            ).to(self._device)
+            self._last_batch_gpu_bytes = (
+                _tensor_bytes(pixel_values)
+                + _tensor_bytes(identity_targets)
+                + _tensor_bytes(depth_targets)
+            )
+        else:
+            pixel_values = None
+            identity_targets = None
+            depth_targets = None
+            self._last_batch_gpu_bytes = 0
         feedback_batch = []
         if self._feedback_buffer:
             feedback_batch = random.sample(
@@ -900,26 +992,56 @@ class VisionOnlineTrainerNode(Node):
             feedback_query_indices = None
             feedback_arm_indices = None
             feedback_labels = None
-        gt_foreground = (identity_targets > 0).float().unsqueeze(1)
-        (
-            target_instance_ids,
-            target_centers,
-            target_depths,
-            target_sizes,
-        ) = _build_instance_targets(
-            identity_targets,
-            depth_targets,
-            NUM_QUERIES,
-        )
-        valid_queries = (target_instance_ids > 0).float().unsqueeze(-1)
-        valid_query_count = valid_queries.sum().clamp_min(1.0)
+        if pixel_values is None:
+            raise RuntimeError("No supervised samples available for training")
 
         self._optimizer.zero_grad(set_to_none=True)
         with torch.autocast(
             device_type=self._device.type,
             enabled=self._use_mixed_precision and self._device.type == "cuda",
         ):
-            outputs = self._model(pixel_values, render_outputs=True)
+            if pixel_values is not None and identity_targets is not None and depth_targets is not None:
+                gt_foreground = (identity_targets > 0).float().unsqueeze(1)
+                (
+                    target_instance_ids,
+                    _target_centers,
+                    _target_depths,
+                    target_sizes,
+                ) = _build_instance_targets(
+                    identity_targets,
+                    depth_targets,
+                    NUM_QUERIES,
+                )
+                outputs = self._model(pixel_values, render_outputs=True)
+                alpha_targets, alpha_target_weights, slot_instance_ids = _build_alpha_targets(
+                    identity_targets,
+                    outputs["centers"],
+                    outputs["sizes"],
+                    outputs["depth"],
+                    outputs["patch_alpha"].shape[-1],
+                )
+                identity_loss = F.binary_cross_entropy_with_logits(
+                    outputs["patch_alpha_logits"],
+                    alpha_targets,
+                    weight=alpha_target_weights.expand_as(alpha_targets),
+                    reduction="sum",
+                )
+                identity_loss = identity_loss / alpha_target_weights.expand_as(
+                    alpha_targets
+                ).sum().clamp_min(1.0)
+                zero_loss = identity_loss.detach() * 0.0
+            else:
+                gt_foreground = None
+                target_instance_ids = None
+                target_sizes = None
+                outputs = None
+                alpha_targets = None
+                slot_instance_ids = None
+                zero_loss = torch.zeros((), device=self._device)
+                identity_loss = zero_loss
+            center_loss = zero_loss
+            size_loss = zero_loss
+            slot_depth_loss = zero_loss
             if feedback_pixel_values is not None:
                 feedback_outputs = self._model(feedback_pixel_values, render_outputs=False)
                 batch_indices = torch.arange(
@@ -934,43 +1056,37 @@ class VisionOnlineTrainerNode(Node):
                 ]
             else:
                 selected_value_logits = None
-            alpha_targets, alpha_target_weights, slot_instance_ids = _build_alpha_targets(
-                identity_targets,
-                outputs["centers"],
-                outputs["sizes"],
-                outputs["depth"],
-                outputs["patch_alpha"].shape[-1],
-            )
-            identity_loss = F.binary_cross_entropy_with_logits(
-                outputs["patch_alpha_logits"],
-                alpha_targets,
-                weight=alpha_target_weights.expand_as(alpha_targets),
-                reduction="sum",
-            )
-            identity_loss = identity_loss / alpha_target_weights.expand_as(
-                alpha_targets
-            ).sum().clamp_min(1.0)
-            zero_loss = identity_loss.detach() * 0.0
-            center_loss = zero_loss
-            size_loss = zero_loss
-            slot_depth_loss = zero_loss
         with torch.autocast(device_type=self._device.type, enabled=False):
-            predicted_occupancy = outputs["predicted_occupancy"].float()
-            predicted_depth = outputs["predicted_depth"].float()
-            depth_error = F.smooth_l1_loss(
-                predicted_depth,
-                depth_targets.float(),
-                reduction="none",
-            )
-            depth_loss = (
-                depth_error * predicted_occupancy
-            ).sum() / predicted_occupancy.sum().clamp_min(1e-6)
-            missed_occupancy_loss = (
-                gt_foreground.float() * (1.0 - predicted_occupancy)
-            ).mean()
-            extra_occupancy_loss = (
-                (1.0 - gt_foreground.float()) * predicted_occupancy
-            ).mean()
+            if outputs is not None and identity_targets is not None and depth_targets is not None:
+                predicted_occupancy = outputs["predicted_occupancy"].float()
+                predicted_depth = outputs["predicted_depth"].float()
+                depth_error = F.smooth_l1_loss(
+                    predicted_depth,
+                    depth_targets.float(),
+                    reduction="none",
+                )
+                depth_loss = (
+                    depth_error * predicted_occupancy
+                ).sum() / predicted_occupancy.sum().clamp_min(1e-6)
+                missed_occupancy_loss = (
+                    gt_foreground.float() * (1.0 - predicted_occupancy)
+                ).mean()
+                extra_occupancy_loss = (
+                    (1.0 - gt_foreground.float()) * predicted_occupancy
+                ).mean()
+                debug_metrics = self._collect_training_debug_metrics(
+                    identity_targets,
+                    target_instance_ids,
+                    slot_instance_ids,
+                    target_sizes,
+                    alpha_targets,
+                    outputs,
+                )
+            else:
+                depth_loss = zero_loss
+                missed_occupancy_loss = zero_loss
+                extra_occupancy_loss = zero_loss
+                debug_metrics = self._empty_debug_metrics()
             loss = (
                 self._identity_loss_weight * identity_loss
                 + self._depth_loss_weight * depth_loss
@@ -982,16 +1098,13 @@ class VisionOnlineTrainerNode(Node):
                     feedback_labels.float(),
                 )
                 loss = loss + self._value_loss_weight * value_loss
+                value_predictions = selected_value_logits.float().sigmoid() >= 0.5
+                value_accuracy = (
+                    value_predictions == (feedback_labels.float() >= 0.5)
+                ).float().mean()
             else:
                 value_loss = loss.detach() * 0.0
-            debug_metrics = self._collect_training_debug_metrics(
-                identity_targets,
-                target_instance_ids,
-                slot_instance_ids,
-                target_sizes,
-                alpha_targets,
-                outputs,
-            )
+                value_accuracy = loss.detach() * 0.0
 
         self._scaler.scale(loss).backward()
         debug_metrics["grad_norm"] = self._grad_norm()
@@ -1008,25 +1121,260 @@ class VisionOnlineTrainerNode(Node):
             "missed_occupancy_loss": float(missed_occupancy_loss.detach().cpu()),
             "extra_occupancy_loss": float(extra_occupancy_loss.detach().cpu()),
             "value_loss": float(value_loss.detach().cpu()),
+            "value_accuracy": float(value_accuracy.detach().cpu()),
             "feedback_batch_size": float(len(feedback_batch)),
             **debug_metrics,
         }
         self._write_metrics(metrics)
-        self._maybe_show_training_debug(batch[0], outputs, metrics, slot_instance_ids)
+        if batch and outputs is not None and slot_instance_ids is not None:
+            self._maybe_show_training_debug(batch[0], outputs, metrics, slot_instance_ids)
         if self._train_step % self._checkpoint_save_interval == 0:
             self._save_checkpoint()
         return metrics
 
+    def _run_test_evaluation(self) -> dict[str, float] | None:
+        batch = self._sample_test_batch()
+        feedback_batch = self._sample_test_feedback_batch()
+        if not batch:
+            if not feedback_batch:
+                self._writer.add_scalar("eval/test_batch_size", 0, self._train_step)
+                self._writer.add_scalar(
+                    "eval/test_feedback_batch_size",
+                    0,
+                    self._train_step,
+                )
+                self.get_logger().info(
+                    "Skipping vision test evaluation because no held-out samples are available"
+                )
+                return None
+            metrics = self._run_feedback_evaluation(feedback_batch)
+            self.get_logger().info(
+                f"Vision feedback test evaluation: train_step={self._train_step}; "
+                f"test_feedback_batch={len(feedback_batch)}/{len(self._test_feedback_buffer)}; "
+                f"value_loss={metrics['value_loss']:.6f}; "
+                f"value_acc={metrics['value_accuracy']:.3f}"
+            )
+            return metrics
+
+        pixel_values = torch.stack(
+            [sample["rgb_normalized"] for sample in batch],
+        ).to(self._device)
+        identity_targets = torch.stack(
+            [sample["instance_segmentation"] for sample in batch],
+        ).to(self._device)
+        depth_targets = torch.stack(
+            [sample["distance_to_camera"] for sample in batch],
+        ).to(self._device)
+        gt_foreground = (identity_targets > 0).float().unsqueeze(1)
+        (
+            target_instance_ids,
+            _target_centers,
+            _target_depths,
+            target_sizes,
+        ) = _build_instance_targets(
+            identity_targets,
+            depth_targets,
+            NUM_QUERIES,
+        )
+
+        was_training = self._model.training
+        self._model.eval()
+        try:
+            with torch.no_grad(), torch.autocast(
+                device_type=self._device.type,
+                enabled=self._use_mixed_precision and self._device.type == "cuda",
+            ):
+                outputs = self._model(pixel_values, render_outputs=True)
+                alpha_targets, alpha_target_weights, slot_instance_ids = _build_alpha_targets(
+                    identity_targets,
+                    outputs["centers"],
+                    outputs["sizes"],
+                    outputs["depth"],
+                    outputs["patch_alpha"].shape[-1],
+                )
+                identity_loss = F.binary_cross_entropy_with_logits(
+                    outputs["patch_alpha_logits"],
+                    alpha_targets,
+                    weight=alpha_target_weights.expand_as(alpha_targets),
+                    reduction="sum",
+                )
+                identity_loss = identity_loss / alpha_target_weights.expand_as(
+                    alpha_targets
+                ).sum().clamp_min(1.0)
+            with torch.no_grad(), torch.autocast(device_type=self._device.type, enabled=False):
+                predicted_occupancy = outputs["predicted_occupancy"].float()
+                predicted_depth = outputs["predicted_depth"].float()
+                depth_error = F.smooth_l1_loss(
+                    predicted_depth,
+                    depth_targets.float(),
+                    reduction="none",
+                )
+                depth_loss = (
+                    depth_error * predicted_occupancy
+                ).sum() / predicted_occupancy.sum().clamp_min(1e-6)
+                missed_occupancy_loss = (
+                    gt_foreground.float() * (1.0 - predicted_occupancy)
+                ).mean()
+                extra_occupancy_loss = (
+                    (1.0 - gt_foreground.float()) * predicted_occupancy
+                ).mean()
+                loss = (
+                    self._identity_loss_weight * identity_loss
+                    + self._depth_loss_weight * depth_loss
+                    + self._missed_occupancy_loss_weight * missed_occupancy_loss
+                )
+                debug_metrics = self._collect_training_debug_metrics(
+                    identity_targets,
+                    target_instance_ids,
+                    slot_instance_ids,
+                    target_sizes,
+                    alpha_targets,
+                    outputs,
+                )
+        finally:
+            if was_training:
+                self._model.train()
+
+        metrics = {
+            "loss": float(loss.detach().cpu()),
+            "identity_loss": float(identity_loss.detach().cpu()),
+            "depth_loss": float(depth_loss.detach().cpu()),
+            "missed_occupancy_loss": float(missed_occupancy_loss.detach().cpu()),
+            "extra_occupancy_loss": float(extra_occupancy_loss.detach().cpu()),
+            "value_loss": 0.0,
+            "value_accuracy": 0.0,
+            **debug_metrics,
+        }
+        if feedback_batch:
+            feedback_metrics = self._run_feedback_evaluation(feedback_batch, write_metrics=False)
+            metrics["loss"] += feedback_metrics["value_loss"]
+            metrics["value_loss"] = feedback_metrics["value_loss"]
+            metrics["value_accuracy"] = feedback_metrics["value_accuracy"]
+        self._write_eval_metrics(metrics, len(batch))
+        self.get_logger().info(
+            f"Vision test evaluation: train_step={self._train_step}; "
+            f"test_batch={len(batch)}/{len(self._test_sample_ids)}; "
+            f"test_feedback_batch={len(feedback_batch)}/{len(self._test_feedback_buffer)}; "
+            f"loss={metrics['loss']:.6f}; "
+            f"identity={metrics['identity_loss']:.6f}; "
+            f"value={metrics['value_loss']:.6f}; "
+            f"value_acc={metrics['value_accuracy']:.3f}; "
+            f"depth={metrics['depth_loss']:.6f}; "
+            f"gt_ids={metrics['debug/first_target_ids']:.0f}; "
+            f"pred_ids={metrics['debug/first_pred_ids']:.0f}; "
+            f"occ_frac={metrics['debug/pred_occ_frac']:.3f}"
+        )
+        return metrics
+
+    def _run_feedback_evaluation(
+        self,
+        feedback_batch: list[dict[str, Any]],
+        *,
+        write_metrics: bool = True,
+    ) -> dict[str, float]:
+        feedback_pixel_values = torch.stack(
+            [sample["rgb_normalized"] for sample in feedback_batch],
+        ).to(self._device)
+        feedback_query_indices = torch.tensor(
+            [int(sample["query_index"]) for sample in feedback_batch],
+            device=self._device,
+            dtype=torch.long,
+        )
+        feedback_arm_indices = torch.tensor(
+            [int(sample["arm_index"]) for sample in feedback_batch],
+            device=self._device,
+            dtype=torch.long,
+        )
+        feedback_labels = torch.tensor(
+            [float(sample["label"]) for sample in feedback_batch],
+            device=self._device,
+            dtype=torch.float32,
+        )
+        was_training = self._model.training
+        self._model.eval()
+        try:
+            with torch.no_grad(), torch.autocast(
+                device_type=self._device.type,
+                enabled=self._use_mixed_precision and self._device.type == "cuda",
+            ):
+                feedback_outputs = self._model(feedback_pixel_values, render_outputs=False)
+                batch_indices = torch.arange(
+                    feedback_pixel_values.shape[0],
+                    device=self._device,
+                    dtype=torch.long,
+                )
+                selected_value_logits = feedback_outputs["value_logits"][
+                    batch_indices,
+                    feedback_query_indices,
+                    feedback_arm_indices,
+                ]
+            with torch.no_grad(), torch.autocast(device_type=self._device.type, enabled=False):
+                value_loss = F.binary_cross_entropy_with_logits(
+                    selected_value_logits.float(),
+                    feedback_labels.float(),
+                )
+                value_accuracy = (
+                    (selected_value_logits.float().sigmoid() >= 0.5)
+                    == (feedback_labels.float() >= 0.5)
+                ).float().mean()
+        finally:
+            if was_training:
+                self._model.train()
+
+        metrics = {
+            "loss": float(value_loss.detach().cpu()),
+            "identity_loss": 0.0,
+            "depth_loss": 0.0,
+            "missed_occupancy_loss": 0.0,
+            "extra_occupancy_loss": 0.0,
+            "value_loss": float(value_loss.detach().cpu()),
+            "value_accuracy": float(value_accuracy.detach().cpu()),
+            **self._empty_debug_metrics(),
+        }
+        if write_metrics:
+            self._write_eval_metrics(metrics, 0)
+        return metrics
+
+    def _sample_test_batch(self) -> list[dict[str, Any]]:
+        if not self._test_sample_ids:
+            return []
+        selected_ids = random.sample(
+            self._test_sample_ids,
+            k=min(self._eval_batch_size, len(self._test_sample_ids)),
+        )
+        batch = []
+        for sample_id in selected_ids:
+            sample = self._sample_cache.get(sample_id)
+            if sample is None:
+                sample = self._load_sample_sync(sample_id)
+            if sample is None:
+                continue
+            self._sample_cache.move_to_end(sample_id)
+            batch.append(sample)
+        return batch
+
+    def _sample_test_feedback_batch(self) -> list[dict[str, Any]]:
+        if not self._test_feedback_buffer:
+            return []
+        return random.sample(
+            list(self._test_feedback_buffer),
+            k=min(self._eval_batch_size, len(self._test_feedback_buffer)),
+        )
+
     def _sample_training_batch(self) -> list[dict[str, Any]]:
-        cached_ids = list(self._sample_cache.keys())
-        batch_size = min(self._train_batch_size, len(self._sample_ids))
+        cached_ids = [
+            sample_id
+            for sample_id in self._sample_cache.keys()
+            if self._sample_splits.get(sample_id) == "train"
+        ]
+        batch_size = min(self._train_batch_size, len(self._train_sample_ids))
         selected_ids: list[str] = []
         if cached_ids:
             selected_ids.extend(random.sample(cached_ids, k=min(batch_size, len(cached_ids))))
         if len(selected_ids) < batch_size:
             uncached_ids = [
                 sample_id
-                for sample_id in self._sample_ids
+                for sample_id in self._train_sample_ids
                 if sample_id not in selected_ids
             ]
             random.shuffle(uncached_ids)
@@ -1043,8 +1391,8 @@ class VisionOnlineTrainerNode(Node):
             batch.append(sample)
         if len(batch) < max(1, min(batch_size, self._train_batch_size)):
             raise RuntimeError(
-                "No loadable Replicator samples available for online training "
-                f"(sample_index={len(self._sample_ids)}, cache={len(self._sample_cache)})"
+                "No loadable samples available for training "
+                f"(train_samples={len(self._train_sample_ids)}, cache={len(self._sample_cache)})"
             )
         self._schedule_sample_prefetch()
         return batch
@@ -1057,6 +1405,28 @@ class VisionOnlineTrainerNode(Node):
             grad = parameter.grad.detach().float()
             total_sq += float(torch.sum(grad * grad).cpu())
         return total_sq ** 0.5
+
+    def _empty_debug_metrics(self) -> dict[str, float]:
+        return {
+            "debug/target_queries": 0.0,
+            "debug/slot_target_queries": 0.0,
+            "debug/first_target_ids": 0.0,
+            "debug/first_pred_ids": 0.0,
+            "debug/gt_fg_frac": 0.0,
+            "debug/pred_occ_mean": 0.0,
+            "debug/pred_occ_frac": 0.0,
+            "debug/patch_alpha_mean": 0.0,
+            "debug/patch_alpha_max": 0.0,
+            "debug/patch_alpha_area_frac": 0.0,
+            "debug/alpha_target_area_frac": 0.0,
+            "debug/pred_size_mean_px": 0.0,
+            "debug/pred_size_min_px": 0.0,
+            "debug/pred_size_max_px": 0.0,
+            "debug/target_size_mean_px": 0.0,
+            "debug/target_size_max_px": 0.0,
+            "debug/presence_prob_mean": 0.0,
+            "debug/value_prob_mean": 0.0,
+        }
 
     def _collect_training_debug_metrics(
         self,
@@ -1217,81 +1587,95 @@ class VisionOnlineTrainerNode(Node):
 
     def _write_metrics(self, metrics: dict[str, float]) -> None:
         self._writer.add_scalar("train/total_loss", metrics["loss"], self._train_step)
-        self._writer.add_scalar(
-            "train/identity_loss",
-            metrics["identity_loss"],
-            self._train_step,
-        )
-        self._writer.add_scalar("train/depth_loss", metrics["depth_loss"], self._train_step)
-        self._writer.add_scalar(
-            "train/missed_occupancy_loss",
-            metrics["missed_occupancy_loss"],
-            self._train_step,
-        )
         self._writer.add_scalar("train/value_loss", metrics["value_loss"], self._train_step)
         self._writer.add_scalar(
-            "feedback/buffer_size",
+            "train/value_accuracy",
+            metrics["value_accuracy"],
+            self._train_step,
+        )
+        if metrics["identity_loss"] > 0.0:
+            self._writer.add_scalar(
+                "train/identity_loss",
+                metrics["identity_loss"],
+                self._train_step,
+            )
+            self._writer.add_scalar("train/depth_loss", metrics["depth_loss"], self._train_step)
+            self._writer.add_scalar(
+                "train/missed_occupancy_loss",
+                metrics["missed_occupancy_loss"],
+                self._train_step,
+            )
+        self._writer.add_scalar("train/grad_norm", metrics["grad_norm"], self._train_step)
+        self._writer.add_scalar(
+            "data/train_feedback",
             len(self._feedback_buffer),
             self._train_step,
         )
         self._writer.add_scalar(
-            "feedback/buffer_cpu_mib",
-            _bytes_to_mib(self._feedback_buffer_cpu_bytes),
+            "data/test_feedback",
+            len(self._test_feedback_buffer),
             self._train_step,
         )
         self._writer.add_scalar(
-            "samples/buffer_size",
-            len(self._sample_cache),
+            "data/train_samples",
+            len(self._train_sample_ids),
             self._train_step,
         )
         self._writer.add_scalar(
-            "samples/index_size",
-            len(self._sample_ids),
+            "data/test_samples",
+            len(self._test_sample_ids),
             self._train_step,
         )
+
+    def _write_eval_metrics(self, metrics: dict[str, float], batch_size: int) -> None:
+        self._writer.add_scalar("eval/total_loss", metrics["loss"], self._train_step)
+        self._writer.add_scalar("eval/value_loss", metrics["value_loss"], self._train_step)
         self._writer.add_scalar(
-            "samples/pending_loads",
-            len(self._sample_futures),
+            "eval/value_accuracy",
+            metrics["value_accuracy"],
             self._train_step,
         )
-        self._writer.add_scalar(
-            "samples/buffer_cpu_mib",
-            _bytes_to_mib(self._sample_buffer_cpu_bytes),
-            self._train_step,
-        )
-        self._writer.add_scalar(
-            "samples/active_batch_gpu_mib",
-            _bytes_to_mib(self._last_batch_gpu_bytes),
-            self._train_step,
-        )
-        self._writer.add_scalar("train/grad_norm", metrics["grad_norm"], self._train_step)
-        if self._device.type == "cuda":
+        if metrics["identity_loss"] > 0.0:
             self._writer.add_scalar(
-                "cuda/allocated_mib",
-                _bytes_to_mib(torch.cuda.memory_allocated(self._device)),
+                "eval/identity_loss",
+                metrics["identity_loss"],
                 self._train_step,
             )
+            self._writer.add_scalar("eval/depth_loss", metrics["depth_loss"], self._train_step)
             self._writer.add_scalar(
-                "cuda/reserved_mib",
-                _bytes_to_mib(torch.cuda.memory_reserved(self._device)),
+                "eval/missed_occupancy_loss",
+                metrics["missed_occupancy_loss"],
                 self._train_step,
             )
+        self._writer.add_scalar(
+            "data/eval_feedback_batch",
+            min(self._eval_batch_size, len(self._test_feedback_buffer)),
+            self._train_step,
+        )
+        if batch_size:
+            self._writer.add_scalar("data/eval_sample_batch", batch_size, self._train_step)
+        self._writer.add_scalar(
+            "data/test_feedback",
+            len(self._test_feedback_buffer),
+            self._train_step,
+        )
 
     def _checkpoint_metadata(self) -> dict[str, Any]:
         return {
             "tensorboard_base_log_dir": str(self._tensorboard_log_dir),
             "tensorboard_run_name": self._tensorboard_run_name,
             "tensorboard_log_dir": str(self._tensorboard_run_dir),
-            "online_training_enabled": True,
             "optimizer": type(self._optimizer).__name__,
-            "learning_rate": self._online_learning_rate,
-            "dataset_dir": str(self._dataset_dir),
+            "learning_rate": self._learning_rate,
             "replay_dir": str(self._replay_dir),
             "sample_buffer_capacity": self._sample_buffer_capacity,
             "sample_prefetch_size": self._sample_prefetch_size,
             "sample_loader_workers": self._sample_loader_workers,
             "min_sample_size": self._min_sample_size,
             "train_batch_size": self._train_batch_size,
+            "train_split_threshold": self._train_split_threshold,
+            "eval_interval_steps": self._eval_interval_steps,
+            "eval_batch_size": self._eval_batch_size,
             "train_steps_per_tick": self._train_steps_per_tick,
             "identity_loss_weight": self._identity_loss_weight,
             "missed_occupancy_loss_weight": self._missed_occupancy_loss_weight,

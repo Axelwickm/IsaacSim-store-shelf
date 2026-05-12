@@ -26,7 +26,7 @@ from .scene_construction import (
 from .vision_panel import DEFAULT_DEBUG_IMAGE_TOPIC, IsaacSimVisionPanel
 
 
-DEFAULT_REPLICATOR_OUTPUT_DIR = "/workspace/collect_vision_data_output"
+DEFAULT_REPLICATOR_OUTPUT_DIR = "/workspace/replay"
 DEFAULT_CAPTURES_PER_RUN = 10
 DEFAULT_CAPTURE_INTERVAL_SECONDS = 0.35
 DEFAULT_CAPTURE_WARMUP_SECONDS = 1.0
@@ -54,6 +54,15 @@ _latest_coordinator_state = None
 _ground_truth_items_publish_elapsed = 0.0
 _trajectory_executors = []
 _flow_state = None
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    return os.environ.get(name, str(default).lower()).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 def _play_timeline_if_needed() -> bool:
@@ -860,7 +869,7 @@ def static(simulation_app) -> str:
     return _setup_store_shelf_scene(
         simulation_app,
         configuration="static",
-        capture_enabled=True,
+        capture_enabled=False,
     )
 
 
@@ -868,5 +877,5 @@ def store_demo(simulation_app) -> str:
     return _setup_store_shelf_scene(
         simulation_app,
         configuration="store_demo",
-        capture_enabled=True,
+        capture_enabled=_env_bool("ISAACSIM_STORE_DEMO_CAPTURE_ENABLED", False),
     )

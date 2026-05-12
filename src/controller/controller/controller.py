@@ -18,6 +18,14 @@ PUBLISHER_MATCH_TIMEOUT_SECONDS = 5.0
 ACK_TIMEOUT_SECONDS = 180.0
 
 
+def _parameter_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _topic_exists(node: Node, topic_name: str) -> bool:
     return any(
         name == topic_name for name, _types in node.get_topic_names_and_types()
@@ -42,9 +50,13 @@ def main() -> None:
     node.declare_parameter("headless", False)
     node.declare_parameter("configuration", "")
     node.declare_parameter("command", "")
+    node.declare_parameter("store_demo_capture_training_data", False)
     headless = node.get_parameter("headless").value
     configuration = str(node.get_parameter("configuration").value).strip()
     command_param = str(node.get_parameter("command").value).strip()
+    store_demo_capture_training_data = _parameter_bool(
+        node.get_parameter("store_demo_capture_training_data").value
+    )
     node.get_logger().info("rclpy is available")
     node.get_logger().info(
         f"RMW_IMPLEMENTATION={os.environ.get('RMW_IMPLEMENTATION', 'unset')}"
@@ -52,6 +64,9 @@ def main() -> None:
     node.get_logger().info(f"headless={headless}")
     node.get_logger().info(f"configuration={configuration}")
     node.get_logger().info(f"command={command_param}")
+    node.get_logger().info(
+        f"store_demo_capture_training_data={store_demo_capture_training_data}"
+    )
 
     request_id = uuid.uuid4().hex
     command_name = command_param or ("start_headless" if headless else "start")
@@ -61,6 +76,7 @@ def main() -> None:
             "id": request_id,
             "command": command_name,
             "configuration": configuration,
+            "store_demo_capture_training_data": store_demo_capture_training_data,
         },
         separators=(",", ":"),
     )

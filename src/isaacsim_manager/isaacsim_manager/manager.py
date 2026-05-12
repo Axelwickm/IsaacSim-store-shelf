@@ -35,12 +35,21 @@ CONFIGURATION_FUNCTIONS = {
 }
 
 
+def _payload_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+
 class IsaacSimManagerNode(Node):
     def __init__(self) -> None:
         super().__init__("isaacsim_manager")
         self._last_start_mode = START_HEADED
         self._simulation_process: subprocess.Popen[str] | None = None
         self._active_configuration = ""
+        self._active_store_demo_capture_training_data = False
         self._isaacsim_root = Path(
             os.environ.get("ISAACSIM_ROOT", "/isaac-sim")
         ).resolve()
@@ -71,6 +80,7 @@ class IsaacSimManagerNode(Node):
         configuration = self._active_configuration
         self._simulation_process = None
         self._active_configuration = ""
+        self._active_store_demo_capture_training_data = False
         if return_code == 0:
             self.get_logger().info(
                 f"Isaac Sim runner exited cleanly for configuration={configuration!r}"
@@ -85,13 +95,24 @@ class IsaacSimManagerNode(Node):
         simulation_process = self._simulation_process
         return simulation_process is not None and simulation_process.poll() is None
 
-    def _start_isaacsim(self, mode: str, configuration: str) -> tuple[bool, str]:
+    def _start_isaacsim(
+        self,
+        mode: str,
+        configuration: str,
+        *,
+        store_demo_capture_training_data: bool = False,
+    ) -> tuple[bool, str]:
         if self._is_running():
             return False, "Isaac Sim is already running"
 
         try:
+            child_env = os.environ.copy()
+            child_env["ISAACSIM_STORE_DEMO_CAPTURE_ENABLED"] = (
+                "1" if store_demo_capture_training_data else "0"
+            )
             self.get_logger().info(
-                f"Starting Isaac Sim runner mode={mode!r} configuration={configuration!r}"
+                f"Starting Isaac Sim runner mode={mode!r} configuration={configuration!r} "
+                f"store_demo_capture_training_data={store_demo_capture_training_data}"
             )
             self._simulation_process = subprocess.Popen(
                 [
@@ -103,6 +124,7 @@ class IsaacSimManagerNode(Node):
                     "--configuration",
                     configuration,
                 ],
+                env=child_env,
                 text=True,
             )
             deadline = time.monotonic() + STARTUP_GRACE_PERIOD_SECONDS
@@ -126,12 +148,14 @@ class IsaacSimManagerNode(Node):
 
         self._last_start_mode = mode
         self._active_configuration = configuration
+        self._active_store_demo_capture_training_data = store_demo_capture_training_data
         return True, f"Isaac Sim runner started in {mode} mode"
 
     def _close_simulation_process(self) -> None:
         simulation_process = self._simulation_process
         self._simulation_process = None
         self._active_configuration = ""
+        self._active_store_demo_capture_training_data = False
         if simulation_process is None:
             return
         try:
@@ -157,6 +181,7 @@ class IsaacSimManagerNode(Node):
 
     def _handle_restart(self) -> tuple[bool, str]:
         configuration = self._active_configuration
+        store_demo_capture_training_data = self._active_store_demo_capture_training_data
         if self._is_running():
             stopped, stop_message = self._stop_isaacsim()
             if not stopped:
@@ -164,21 +189,28 @@ class IsaacSimManagerNode(Node):
 
         if not configuration:
             return False, "No active simulation configuration to restart"
-        success, message = self._start_isaacsim(self._last_start_mode, configuration)
+        success, message = self._start_isaacsim(
+            self._last_start_mode,
+            configuration,
+            store_demo_capture_training_data=store_demo_capture_training_data,
+        )
         if success:
             message = f"Isaac Sim restarted in {self._last_start_mode} mode"
         return success, message
 
-    def _parse_control_message(self, message: String) -> tuple[str, str, str]:
+    def _parse_control_message(self, message: String) -> tuple[str, str, str, bool]:
         try:
             payload = json.loads(message.data)
         except json.JSONDecodeError:
-            return uuid.uuid4().hex, message.data.strip().lower(), ""
+            return uuid.uuid4().hex, message.data.strip().lower(), "", False
 
         request_id = str(payload.get("id") or uuid.uuid4().hex)
         command = str(payload.get("command") or "").strip().lower()
         configuration = str(payload.get("configuration") or "").strip()
-        return request_id, command, configuration
+        store_demo_capture_training_data = _payload_bool(
+            payload.get("store_demo_capture_training_data", False)
+        )
+        return request_id, command, configuration, store_demo_capture_training_data
 
     def _publish_ack(
         self,
@@ -203,14 +235,20 @@ class IsaacSimManagerNode(Node):
         self.get_logger().info(f"Published manager ack: {ack.data}")
 
     def _handle_control(self, message: String) -> None:
-        request_id, command, configuration = self._parse_control_message(message)
+        (
+            request_id,
+            command,
+            configuration,
+            store_demo_capture_training_data,
+        ) = self._parse_control_message(message)
         scene = os.environ.get(
             "ISAACSIM_COLLECT_VISION_SCENE",
             DEFAULT_COLLECT_VISION_SCENE,
         )
         self.get_logger().info(
             f"Received manager command id={request_id!r} command={command!r} "
-            f"configuration={configuration!r}"
+            f"configuration={configuration!r} "
+            f"store_demo_capture_training_data={store_demo_capture_training_data}"
         )
         if command in {"start", "start_headless", "restart"} and not configuration:
             success = False
@@ -227,9 +265,17 @@ class IsaacSimManagerNode(Node):
             return
 
         if command == "start":
-            success, result = self._start_isaacsim(START_HEADED, configuration)
+            success, result = self._start_isaacsim(
+                START_HEADED,
+                configuration,
+                store_demo_capture_training_data=store_demo_capture_training_data,
+            )
         elif command == "start_headless":
-            success, result = self._start_isaacsim(START_HEADLESS, configuration)
+            success, result = self._start_isaacsim(
+                START_HEADLESS,
+                configuration,
+                store_demo_capture_training_data=store_demo_capture_training_data,
+            )
         elif command in {"stop", "kill"}:
             success, result = self._stop_isaacsim()
         elif command == "restart":

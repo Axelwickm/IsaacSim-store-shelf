@@ -18,9 +18,9 @@ DEFAULT_IMAGE_SIZE = 384
 
 
 def _stable_sample_float(sample_id: str) -> float:
-    digest = hashlib.sha256(sample_id.encode("utf-8")).digest()
-    value = int.from_bytes(digest[:8], byteorder="big", signed=False)
-    return value / float(2**64)
+    digest = hashlib.md5(sample_id.encode("utf-8")).digest()
+    value = int.from_bytes(digest, byteorder="big", signed=False)
+    return value / float(2**128)
 
 
 def _split_matches(sample_id: str, split: str, train_split_threshold: float) -> bool:
@@ -32,6 +32,17 @@ def _split_matches(sample_id: str, split: str, train_split_threshold: float) -> 
     if split == "test":
         return sample_value >= train_split_threshold
     raise ValueError(f"Unsupported split {split!r}; expected 'all', 'train', or 'test'")
+
+
+def stable_sample_split(
+    sample_filename: str,
+    train_split_threshold: float = TRAIN_SPLIT_THRESHOLD,
+) -> str:
+    return (
+        "train"
+        if _stable_sample_float(sample_filename) < train_split_threshold
+        else "test"
+    )
 
 
 def _decode_instance_segmentation_ids(segmentation: np.ndarray) -> np.ndarray:
@@ -111,22 +122,13 @@ class StoreShelfVisionDataset(Dataset):
         sample_ids = []
         for path in sorted(self.dataset_dir.glob("rgb_*.png")):
             sample_id = path.stem.split("_")[-1]
-            split_key = self._sample_split_key(sample_id)
             if self._sample_exists(sample_id) and _split_matches(
-                split_key,
+                path.name,
                 self.split,
                 self.train_split_threshold,
             ):
                 sample_ids.append(sample_id)
         return sample_ids
-
-    def _sample_split_key(self, sample_id: str) -> str:
-        metadata_path = self.dataset_dir / f"metadata_{sample_id}.json"
-        if not metadata_path.exists():
-            return sample_id
-        with open(metadata_path, "r", encoding="utf-8") as handle:
-            metadata = json.load(handle)
-        return str(metadata.get("run_id") or sample_id)
 
     def _sample_exists(self, sample_id: str) -> bool:
         required_paths = [

@@ -35,19 +35,14 @@ def generate_launch_description() -> LaunchDescription:
                 description="Whether to enable CUDA mixed precision for vision inference.",
             ),
             DeclareLaunchArgument(
-                "vision_online_training_enabled",
+                "vision_collect_training_data",
                 default_value="false",
-                description="Record replay samples and launch the external online vision trainer.",
+                description="Record supervised Replicator samples and planner feedback into replay.",
             ),
             DeclareLaunchArgument(
                 "vision_replay_dir",
-                default_value="/workspace/replay/vision",
+                default_value="/workspace/replay",
                 description="Directory used as the durable replay-sample queue.",
-            ),
-            DeclareLaunchArgument(
-                "vision_dataset_dir",
-                default_value="/workspace/collect_vision_data_output",
-                description="Replicator dataset directory used for online billboard training.",
             ),
             DeclareLaunchArgument(
                 "vision_checkpoint_reload_period_sec",
@@ -78,74 +73,6 @@ def generate_launch_description() -> LaunchDescription:
                 "vision_max_suggested_markers",
                 default_value="32",
                 description="Maximum projected suggested 3D item markers to publish.",
-            ),
-            DeclareLaunchArgument(
-                "vision_replay_buffer_capacity",
-                default_value="8000",
-                description="Maximum replay samples kept in memory for online value learning.",
-            ),
-            DeclareLaunchArgument(
-                "vision_min_replay_size",
-                default_value="2",
-                description="Minimum replay samples before online training begins.",
-            ),
-            DeclareLaunchArgument(
-                "vision_train_batch_size",
-                default_value="2",
-                description="Online billboard training batch size.",
-            ),
-            DeclareLaunchArgument(
-                "vision_train_steps_per_tick",
-                default_value="4",
-                description="Maximum online optimizer steps to run per timer tick.",
-            ),
-            DeclareLaunchArgument(
-                "vision_train_tick_period_sec",
-                default_value="0.01",
-                description="Seconds between online optimizer timer ticks.",
-            ),
-            DeclareLaunchArgument(
-                "vision_sample_prefetch_size",
-                default_value="64",
-                description="Decoded Replicator sample cache target for online vision training.",
-            ),
-            DeclareLaunchArgument(
-                "vision_sample_loader_workers",
-                default_value="2",
-                description="Background workers used to decode online vision samples.",
-            ),
-            DeclareLaunchArgument(
-                "vision_online_learning_rate",
-                default_value="2e-4",
-                description="Learning rate for online replay training.",
-            ),
-            DeclareLaunchArgument(
-                "vision_geometry_loss_weight",
-                default_value="1.0",
-                description="Weight for online billboard instance-segmentation supervision.",
-            ),
-            DeclareLaunchArgument(
-                "vision_presence_loss_weight",
-                default_value="0.2",
-                description="Weight for online missed-occupancy supervision.",
-            ),
-            DeclareLaunchArgument(
-                "vision_depth_loss_weight",
-                default_value="0.2",
-                description="Weight for online billboard depth supervision.",
-            ),
-            DeclareLaunchArgument(
-                "vision_tensorboard_log_dir",
-                default_value="/workspace/tensorboard/vision",
-                description="TensorBoard base log directory used only when online vision training is enabled.",
-            ),
-            DeclareLaunchArgument(
-                "vision_tensorboard_run_name",
-                default_value="",
-                description=(
-                    "Optional TensorBoard run subdirectory name. If empty, vision "
-                    "generates a unique timestamped name or reuses the checkpoint run."
-                ),
             ),
             DeclareLaunchArgument(
                 "vision_cuda_memory_log_period_sec",
@@ -209,6 +136,9 @@ def generate_launch_description() -> LaunchDescription:
                 PythonLaunchDescriptionSource(str(sim_launch)),
                 launch_arguments={
                     "configuration": "store_demo",
+                    "store_demo_capture_training_data": LaunchConfiguration(
+                        "vision_collect_training_data"
+                    ),
                     "use_moveit": "true",
                     "planning_pipeline": LaunchConfiguration("motion_pipeline_id"),
                     "controller_spawner_delay": LaunchConfiguration(
@@ -244,9 +174,8 @@ def generate_launch_description() -> LaunchDescription:
                     "suggested_item_markers_topic": LaunchConfiguration(
                         "vision_suggested_item_markers_topic"
                     ),
-                    "online_training_enabled": LaunchConfiguration("vision_online_training_enabled"),
+                    "collect_training_data": LaunchConfiguration("vision_collect_training_data"),
                     "replay_dir": LaunchConfiguration("vision_replay_dir"),
-                    "dataset_dir": LaunchConfiguration("vision_dataset_dir"),
                     "checkpoint_reload_period_sec": LaunchConfiguration(
                         "vision_checkpoint_reload_period_sec"
                     ),
@@ -254,19 +183,6 @@ def generate_launch_description() -> LaunchDescription:
                     "query_presence_threshold": "0.20",
                     "max_suggested_markers": LaunchConfiguration("vision_max_suggested_markers"),
                     "camera_frame_convention": LaunchConfiguration("vision_camera_frame_convention"),
-                    "replay_buffer_capacity": LaunchConfiguration("vision_replay_buffer_capacity"),
-                    "min_replay_size": LaunchConfiguration("vision_min_replay_size"),
-                    "train_batch_size": LaunchConfiguration("vision_train_batch_size"),
-                    "train_steps_per_tick": LaunchConfiguration("vision_train_steps_per_tick"),
-                    "train_tick_period_sec": LaunchConfiguration("vision_train_tick_period_sec"),
-                    "sample_prefetch_size": LaunchConfiguration("vision_sample_prefetch_size"),
-                    "sample_loader_workers": LaunchConfiguration("vision_sample_loader_workers"),
-                    "online_learning_rate": LaunchConfiguration("vision_online_learning_rate"),
-                    "geometry_loss_weight": LaunchConfiguration("vision_geometry_loss_weight"),
-                    "presence_loss_weight": LaunchConfiguration("vision_presence_loss_weight"),
-                    "depth_loss_weight": LaunchConfiguration("vision_depth_loss_weight"),
-                    "tensorboard_log_dir": LaunchConfiguration("vision_tensorboard_log_dir"),
-                    "tensorboard_run_name": LaunchConfiguration("vision_tensorboard_run_name"),
                     "use_mixed_precision": LaunchConfiguration(
                         "vision_use_mixed_precision"
                     ),
